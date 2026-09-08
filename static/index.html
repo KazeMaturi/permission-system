@@ -326,6 +326,7 @@
       <div class="toolbar acct-filter">
         <span class="muted">快捷查看</span>
         <button class="btn text active" data-acct-filter="real">实际账号</button>
+        <button class="btn text" data-acct-filter="official">官方账号</button>
         <button class="btn text" data-acct-filter="test">测试账号</button>
         <button class="btn text" data-acct-filter="all">全部</button>
       </div>
@@ -334,6 +335,12 @@
         <table id="acct-table"><thead><tr>
           <th>账号</th><th>当前等级</th><th>状态</th><th>用途</th><th>入团/授权日</th><th>最近登录IP</th><th>设备码</th><th>备注</th><th>操作</th>
         </tr></thead><tbody id="acct-body"></tbody></table>
+      </div>
+      <div class="card" id="acct-official-card" style="display:none">
+        <h3>官方账号</h3>
+        <table id="acct-official-table"><thead><tr>
+          <th>账号</th><th>当前等级</th><th>状态</th><th>用途</th><th>入团/授权日</th><th>最近登录IP</th><th>设备码</th><th>备注</th><th>操作</th>
+        </tr></thead><tbody id="acct-official-body"></tbody></table>
       </div>
       <div class="card" id="acct-test-card" style="display:none">
         <h3>测试账号</h3>
@@ -356,15 +363,17 @@
       <p class="hint">仅超级管理员可见与可操作。在此为其余账号设置 / 取消「管理员」身份（管理角色：评审委员会成员 / 团队负责人 / 质量组长 / 特色小组长）。团队负责人与质量组长须指定所属<b>大团队</b>；特色小组长须指定所属<b>二级组</b>（二级组隶属大团队并涵盖具体分类，结构同《评审权限统计表》表头）。管理员身份决定其是否可执行违规删改、组长/委员会记录维护等管理动作。</p>
       <div class="card">
         <div class="toolbar">
-          <label>目标账号<input id="am-account" list="am-acct-list" placeholder="输入或选择账号"></label>
-          <datalist id="am-acct-list"></datalist>
-          <label>管理角色<select id="am-role"></select></label>
-          <label id="am-scope-label" style="display:none">管辖范围<select id="am-scope"></select></label>
-          <button class="btn primary" id="btn-am-grant">设为管理员</button>
-          <button class="btn ghost" id="btn-am-revoke">取消管理员</button>
-          <button class="btn" id="btn-new-account" data-superadmin="1">+ 新建账号</button>
+          <input id="am-filter-kw" placeholder="账号 / 昵称" style="width:160px">
+          <label>管理角色
+            <select id="am-filter-role"><option value="">全部角色</option><option value="_none_">无管理角色</option></select>
+          </label>
+          <label>账号类型
+            <select id="am-filter-official"><option value="">全部</option><option value="1">官方账号</option><option value="0">普通账号</option></select>
+          </label>
+          <button class="btn" id="btn-am-filter">查询</button>
+          <button class="btn ghost" id="btn-am-reset">重置</button>
           <span class="spacer"></span>
-          <span class="muted" id="am-tip"></span>
+          <button class="btn" id="btn-new-account" data-superadmin="1">+ 新建账号</button>
         </div>
         <table id="am-table"><thead><tr>
           <th>账号</th><th>等级</th><th>状态</th><th>是否管理员</th><th>是否超级管理员</th><th>是否官方账号</th><th>现任管理角色</th><th>操作</th>

@@ -15,6 +15,8 @@ import datetime
 import hashlib
 import secrets
 import urllib.parse
+import urllib.request
+import socket
 import email.utils
 import email
 from email.parser import BytesParser
@@ -388,7 +390,9 @@ def cap_base(conn, account_id, key):
     return bool(c and c["base"](conn, account_id))
 
 def has_cap(conn, account_id, key):
-    """账号是否拥有某项系统功能权限：单独覆盖优先，否则按默认推导。"""
+    """账号是否拥有某项系统功能权限：单独覆盖优先；超级管理员默认拥有全部能力；否则按默认推导。"""
+    if account_id and is_super_admin(conn, account_id):
+        return True
     ov = cap_override(conn, account_id, key)
     if ov is not None:
         return bool(ov)
@@ -1083,6 +1087,8 @@ def build_where(filters):
         clauses.append("p.recycled=?"); params.append(int(filters["recycled"]))
     if filters.get("only_active"):
         clauses.append("p.status IN (%s)" % ",".join("?" * len(ACTIVE_PERM))); params.extend(ACTIVE_PERM)
+    if filters.get("exclude_official"):
+        clauses.append("COALESCE(a.is_official,0)=0")
     return ("WHERE " + " AND ".join(clauses)) if clauses else "", params
 
 def detect_conflicts(conn):
@@ -1150,12 +1156,81 @@ def detect_redundancy(conn):
                                     ids=[x["id"]]))
     return out
 
+# ---------------------------------------------------------------- IP 与归属地
+IP_LOC_CACHE = {}  # ip -> (location, ts)
+IP_LOC_TTL = 86400 * 7  # 7 天
+
+def _is_private_ip(ip):
+    """判断是否为内网/回环地址（无需查询归属地）。"""
+    if not ip:
+        return True
+    try:
+        a = socket.inet_aton(ip)
+    except (OSError, TypeError):
+        return True
+    # 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16
+    if a[0] == 127 or a[0] == 10 or (a[0] == 172 and 16 <= a[1] <= 31) or (a[0] == 192 and a[1] == 168) or (a[0] == 169 and a[1] == 254):
+        return True
+    return False
+
+def ip_location(ip, timeout=3):
+    """返回 IP 归属地（如 中国香港），带内存缓存；内网返回 本地网络；查询失败返回空字符串。"""
+    if _is_private_ip(ip):
+        return "本地网络"
+    now = datetime.datetime.now().timestamp()
+    cached = IP_LOC_CACHE.get(ip)
+    if cached and (now - cached[1]) < IP_LOC_TTL:
+        return cached[0]
+    try:
+        url = "http://ip-api.com/json/%s?lang=zh-CN&fields=status,message,country,countryCode,regionName,city,query" % urllib.parse.quote(ip)
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        if data.get("status") == "success":
+            loc = data.get("country") or ""
+            if data.get("regionName") and data.get("regionName") != loc:
+                loc = (data.get("regionName") + " " + loc).strip()
+            if data.get("city") and data.get("city") not in loc:
+                loc = (data.get("city") + " " + loc).strip()
+        else:
+            loc = ""
+    except Exception:
+        loc = ""
+    IP_LOC_CACHE[ip] = (loc, now)
+    return loc
+
+def ip_display(ip):
+    """用于展示：IP + 归属地，如 202.85.53.14（中国香港）。"""
+    loc = ip_location(ip)
+    if not loc or loc == ip:
+        return ip or "—"
+    return "%s（%s）" % (ip, loc)
+
 # ---------------------------------------------------------------- HTTP
 class Handler(BaseHTTPRequestHandler):
     # 启用 HTTP/1.1 持久连接：浏览器可复用 TCP 连接，避免大量短连接堆积为
     # CLOSE_WAIT/TIME_WAIT（此前表现为「越用越慢直至连不上」）。
     # 前提：所有响应必须携带准确的 Content-Length，故统一收敛到 _send 出口。
     protocol_version = "HTTP/1.1"
+
+    def client_ip(self):
+        """优先从头获取真实客户端 IP（反向代理/负载均衡场景），否则取 TCP 连接地址。"""
+        # 常见代理头：X-Forwarded-For 可能为 "client, proxy1, proxy2"
+        xff = self.headers.get("X-Forwarded-For") or ""
+        if xff:
+            # 取最左侧（最接近真实客户端）的非空地址
+            for part in xff.split(","):
+                ip = part.strip()
+                if ip:
+                    return ip
+        xri = self.headers.get("X-Real-Ip") or self.headers.get("X-Real-IP")
+        if xri:
+            return xri.strip()
+        fwd = self.headers.get("Forwarded")
+        if fwd:
+            m = re.search(r'for="?([^";, ]+)', fwd)
+            if m:
+                return m.group(1).strip()
+        return self.client_address[0] if self.client_address else ""
 
     def _send(self, code, obj=None, body=None, ctype="application/json; charset=utf-8", headers=None):
         if obj is not None:
@@ -1299,7 +1374,7 @@ class Handler(BaseHTTPRequestHandler):
         SESSIONS[token] = {"account_id": r["account_id"], "expires": datetime.datetime.now().timestamp() + SESSION_TTL}
         # 登录审计：记录 IP / 设备码 / User-Agent（系统管理-账号登录情况 仅超级管理员可见）
         try:
-            ip = self.client_address[0] if self.client_address else ""
+            ip = self.client_ip()
             ua = (self.headers.get("User-Agent") or "")[:200]
             device_id = (b.get("device_id") or "").strip()[:64]
             now = _now()
@@ -1442,7 +1517,9 @@ class Handler(BaseHTTPRequestHandler):
                 status_dist = conn.execute("SELECT status, COUNT(*) c FROM account GROUP BY status").fetchall()
                 domain_cov = conn.execute(
                     """SELECT cd.domain AS domain, COUNT(DISTINCT p.account_id) AS persons FROM permission p
-                       LEFT JOIN category_dict cd ON p.category=cd.category WHERE p.recycled=0 AND p.status IN (%s)
+                       LEFT JOIN category_dict cd ON p.category=cd.category
+                       LEFT JOIN account a ON p.account_id=a.account_id
+                       WHERE p.recycled=0 AND p.status IN (%s) AND COALESCE(a.is_official,0)=0
                        GROUP BY cd.domain""" % ",".join("?" * len(ACTIVE_PERM)), tuple(ACTIVE_PERM)).fetchall()
                 ta = conn.execute("SELECT MAX(period) AS lp FROM assess_record").fetchone()["lp"]
                 assess = self._assess_summary(conn, ta) if ta else None
@@ -1466,11 +1543,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, dict(rows=[dict(r) for r in rows]))
             if path == "/api/accounts":
                 rows = conn.execute("SELECT * FROM account ORDER BY account_id").fetchall()
-                return self._send(200, dict(rows=[dict(r) for r in rows], account_levels=ACCOUNT_LEVELS))
+                out = []
+                for r in rows:
+                    d = dict(r)
+                    d["last_login_ip_display"] = ip_display(d.get("last_login_ip") or "")
+                    out.append(d)
+                return self._send(200, dict(rows=out, account_levels=ACCOUNT_LEVELS))
             if path == "/api/permissions":
                 filters = {k: g(k) for k in ("domain","group_name","category","perm_type","level","status","system_version","account_id","operator","effect_from","effect_to")}
                 if g("recycled") in ("0","1"): filters["recycled"] = g("recycled")
                 if g("only_active") == "1": filters["only_active"] = 1
+                filters["exclude_official"] = 1
                 where, params = build_where(filters)
                 page = int(g("page") or 1); size = int(g("size") or 50)
                 total = conn.execute("SELECT COUNT(*) FROM permission p LEFT JOIN category_dict cd ON p.category=cd.category LEFT JOIN account a ON p.account_id=a.account_id " + where, params).fetchone()[0]
@@ -1489,6 +1572,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(403, {"error": "无权限：统计已归入系统管理，仅管理员可访问"})
                 filters = {k: g(k) for k in ("domain","group_name","category","perm_type","level","status","system_version","account_id","operator","effect_from","effect_to")}
                 filters["dim"] = g("dim") or "domain"
+                filters["exclude_official"] = 1
                 return self._send(200, dict(dim=filters["dim"], rows=cross_stats(conn, filters)))
             if path == "/api/conflicts":
                 aid = self._auth_account(conn)
@@ -1658,7 +1742,12 @@ class Handler(BaseHTTPRequestHandler):
                 if not is_super_admin(conn, self._auth_account(conn)):
                     return self._send(403, {"error": "无权限：登录情况仅超级管理员可查看"})
                 rows = conn.execute("SELECT * FROM login_log ORDER BY id DESC LIMIT 500").fetchall()
-                return self._send(200, dict(rows=[dict(r) for r in rows]))
+                out = []
+                for r in rows:
+                    d = dict(r)
+                    d["ip_display"] = ip_display(d.get("ip") or "")
+                    out.append(d)
+                return self._send(200, dict(rows=out))
             if path == "/api/password-reset-requests":
                 if not is_super_admin(conn, self._auth_account(conn)):
                     return self._send(403, {"error": "无权限：密码恢复申请仅超级管理员可查看"})
@@ -1684,7 +1773,8 @@ class Handler(BaseHTTPRequestHandler):
                 domains = [x[0] for x in conn.execute("SELECT DISTINCT domain FROM category_dict ORDER BY domain")]
                 groups = [dict(group_name=x[0], domain=x[1]) for x in
                           conn.execute("SELECT DISTINCT group_name, domain FROM category_dict ORDER BY domain, group_name")]
-                return self._send(200, dict(rows=out, admin_roles=sorted(ADMIN_ROLES), extra_admin_role=EXTRA_ADMIN_ROLE,
+                role_order = ["评审委员会成员", "团队负责人", "质量组长", EXTRA_ADMIN_ROLE]
+                return self._send(200, dict(rows=out, admin_roles=[r for r in role_order if r in (ADMIN_ROLES|{EXTRA_ADMIN_ROLE})],
                                             scoped_roles=SCOPED_ADMIN_ROLES, domains=domains, groups=groups))
             if path == "/api/capabilities":
                 # 系统现有权限清单 + 各权限当前持有账号数（统计）
@@ -1893,11 +1983,11 @@ class Handler(BaseHTTPRequestHandler):
         if g("recycled") in ("0","1"): filters["recycled"] = g("recycled")
         if g("only_active") == "1": filters["only_active"] = 1
         where, params = build_where(filters)
-        # 评审权限一览仅显示实际用户账号，剔除测试账号
+        # 评审权限一览仅显示实际用户账号，剔除测试账号与官方账号
         if where.strip():
-            where2 = where + " AND a.is_test=0"
+            where2 = where + " AND a.is_test=0 AND COALESCE(a.is_official,0)=0"
         else:
-            where2 = "WHERE a.is_test=0"
+            where2 = "WHERE a.is_test=0 AND COALESCE(a.is_official,0)=0"
         page = int(g("page") or 1); size = int(g("size") or 50)
         # 先统计符合条件的账号
         acct_sql = """SELECT COUNT(DISTINCT p.account_id) FROM permission p

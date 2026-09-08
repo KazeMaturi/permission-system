@@ -175,7 +175,7 @@ async function loadLoginLogs(){
   if(!body) return;
   body.innerHTML=rows.length?rows.map(r=>`<tr>
     <td>${escMsg(r.account_id)}</td><td>${escMsg(r.login_time||"")}</td>
-    <td>${escMsg(r.ip||"—")}</td><td>${escMsg(r.device_id||"—")}</td>
+    <td>${escMsg(r.ip_display||r.ip||"—")}</td><td>${escMsg(r.device_id||"—")}</td>
     <td class="wrap" style="max-width:320px">${escMsg(r.user_agent||"—")}</td></tr>`).join(""):'<tr><td colspan="5" class="empty">暂无登录记录</td></tr>';
 }
 function openFlowPreview(n){
@@ -1354,7 +1354,7 @@ function bindStripActions(bodyId, sub){
 }
 
 // ---------- 管理员管理（仅超级管理员可操作；含评审角色绑定，原独立页签已并入） ----------
-let AM_META={scoped:{},domains:[],groups:[]};
+let AM_META={scoped:{},domains:[],groups:[]}, AM_ROWS=[];
 function amScopeOptions(role){
   if(role==="特色小组长"){
     return AM_META.groups.map(g=>'<option value="'+escMsg(g.group_name)+'">'+escMsg(g.group_name)+"（"+escMsg(g.domain)+"）</option>").join("");
@@ -1393,11 +1393,26 @@ async function loadAdminMgmt(){
   const d=await API("/api/admin/accounts");
   if(d.error){await UI.alert("加载失败："+d.error);return;}
   AM_META={scoped:d.scoped_roles||{},domains:d.domains||[],groups:d.groups||[]};
-  const roles=[...(d.admin_roles||[]),d.extra_admin_role].filter(Boolean);
-  const sel=document.getElementById("am-role");
-  if(sel){sel.innerHTML=roles.map(r=>'<option value="'+r+'">'+r+'</option>').join("");refreshCustomSelect("am-role");updateAmScope();}
+  const roles=d.admin_roles||[]; // 已按期望顺序返回
+  // 填充筛选下拉
+  const frole=document.getElementById("am-filter-role");
+  if(frole){frole.innerHTML='<option value="">全部角色</option><option value="_none_">无管理角色</option>'+roles.map(r=>'<option value="'+r+'">'+r+'</option>').join("");refreshCustomSelect("am-filter-role");}
   document.getElementById("am-acct-list").innerHTML=(d.rows||[]).map(r=>'<option value="'+r.account_id+'"></option>').join("");
-  const rows=d.rows||[];
+  let rows=d.rows||[];
+  // 筛选
+  const kw=(val("am-filter-kw")||"").trim().toLowerCase();
+  const fRole=val("am-filter-role");
+  const fOff=val("am-filter-official");
+  if(kw) rows=rows.filter(r=>r.account_id.toLowerCase().includes(kw)||(r.display_name||"").toLowerCase().includes(kw));
+  if(fOff!=="") rows=rows.filter(r=>!!r.is_official==(fOff==="1"));
+  if(fRole){
+    rows=rows.filter(r=>{
+      const held=(r.roles||[]).filter(x=>x.status==='在任'&&roles.includes(x.role)).map(x=>x.role);
+      if(fRole==="_none_") return held.length===0;
+      return held.includes(fRole);
+    });
+  }
+  AM_ROWS=rows; // 缓存当前显示行，便于后续操作
   document.getElementById("am-body").innerHTML=rows.length?rows.map(r=>{
     const isAdm=!!r.is_admin, isSA=!!r.is_super_admin, isOff=!!r.is_official;
     const myRoles=(r.roles||[]).filter(x=>x.status==='在任'&&(roles.includes(x.role))).map(x=>x.role+(x.scope?'<span class="muted">·'+escMsg(x.scope)+'</span>':''));
@@ -1409,9 +1424,11 @@ async function loadAdminMgmt(){
       });
     }
     if(!acts) acts='<span class="muted">—</span>';
+    // 官方账号身份标签显示为「官方」
+    const levelCell=isOff?'<span class="pill" style="background:#1d4ed8;color:#fff">官方</span>':`<span class="pill ${LEVEL_CLASS[r.level]||'n'}">${r.level||""}</span>`;
     return `<tr>
       <td>${r.account_id}${r.display_name&&r.display_name!==r.account_id?'<br><span class="muted">'+r.display_name+'</span>':''}</td>
-      <td><span class="pill ${LEVEL_CLASS[r.level]||'n'}">${r.level||""}</span></td>
+      <td>${levelCell}</td>
       <td><span class="pill ${STATUS_CLASS[r.status]||'n'}">${r.status||""}</span></td>
       <td>${isAdm?'<span class="pill g">是</span>':'<span class="muted">否</span>'}</td>
       <td>${isSA?'<span class="pill" style="background:#7c2d12;color:#fff">是</span>':'<span class="muted">否</span>'}</td>
@@ -1424,7 +1441,7 @@ async function loadAdminMgmt(){
     const target=b.dataset.amToggle, role=b.dataset.role, grant=b.dataset.grant==="1";
     if(grant&&AM_META.scoped[role]){openAmScope(target,role);return;}
     if(!await UI.confirm("确认"+(grant?"设为":"取消")+"「"+role+"」："+target+"？"))return;
-    if(grant)await amGrant(target,role,val("am-scope")||"");
+    if(grant)await amGrant(target,role,"");
     else await amRevoke(target,role);
   });
   loadEvalRoleAssigns();
@@ -1587,23 +1604,26 @@ async function loadPermSort(){
 
 // ---------- 基础数据 ----------
 function renderAcctRow(r){
-  const usage = `<span class="pill ${r.is_test?'y':'g'}">${r.is_test?'测试':'实际'}</span>`;
-  const usageBtn = (ME && ME.is_super_admin) ? ` <button class="linkbtn" data-acct-test="${r.id}" data-current="${r.is_test?1:0}" title="切换用途">标记为${r.is_test?'实际':'测试'}</button>` : '';
+  const isOff=!!r.is_official;
+  const usage = isOff?'<span class="pill" style="background:#1d4ed8;color:#fff">官方</span>':`<span class="pill ${r.is_test?'y':'g'}">${r.is_test?'测试':'实际'}</span>`;
+  const usageBtn = (ME && ME.is_super_admin && !isOff) ? ` <button class="linkbtn" data-acct-test="${r.id}" data-current="${r.is_test?1:0}" title="切换用途">标记为${r.is_test?'实际':'测试'}</button>` : '';
   const ops = [];
   if(ME) ops.push(`<button class="linkbtn" data-aid="${r.id}" data-auth="write">编辑</button>`);
   if(ME && ME.is_super_admin) ops.push(`<button class="linkbtn del" data-acct-del="${r.id}" title="彻底删除">删除</button>`);
+  const levelCell=isOff?'<span class="pill" style="background:#1d4ed8;color:#fff">官方</span>':`<span class="pill ${LEVEL_CLASS[r.level]||'n'}">${r.level}</span>`;
   return `<tr>
-    <td>${r.account_id}</td><td><span class="pill ${LEVEL_CLASS[r.level]||'n'}">${r.level}</span></td><td><span class="pill ${STATUS_CLASS[r.status]||'n'}">${r.status}</span></td>
+    <td>${r.account_id}</td><td>${levelCell}</td><td><span class="pill ${STATUS_CLASS[r.status]||'n'}">${r.status}</span></td>
     <td>${usage}${usageBtn}</td>
-    <td>${r.join_date||""}</td><td>${r.last_login_ip||'<span class="muted">—</span>'}</td><td>${r.last_login_device||'<span class="muted">—</span>'}</td><td>${r.note||""}</td>
+    <td>${r.join_date||""}</td><td>${r.last_login_ip_display?escMsg(r.last_login_ip_display):'<span class="muted">—</span>'}</td><td>${r.last_login_device?escMsg(r.last_login_device):'<span class="muted">—</span>'}</td><td>${r.note||""}</td>
     <td>${ops.length?ops.join(' '):'<span class="muted">—</span>'}</td></tr>`;
 }
 async function loadAccts(){const d=await API("/api/accounts");
-  const real=d.rows.filter(r=>!r.is_test), test=d.rows.filter(r=>r.is_test);
+  const official=d.rows.filter(r=>r.is_official), real=d.rows.filter(r=>!r.is_official&&!r.is_test), test=d.rows.filter(r=>!r.is_official&&r.is_test);
   document.getElementById("acct-body").innerHTML=real.length?real.map(renderAcctRow).join(""):'<tr><td colspan="9" class="empty">暂无实际账号</td></tr>';
+  document.getElementById("acct-official-body").innerHTML=official.length?official.map(renderAcctRow).join(""):'<tr><td colspan="9" class="empty">暂无官方账号</td></tr>';
   document.getElementById("acct-test-body").innerHTML=test.length?test.map(renderAcctRow).join(""):'<tr><td colspan="9" class="empty">暂无测试账号</td></tr>';
-  document.querySelectorAll("#acct-body [data-aid], #acct-test-body [data-aid]").forEach(b=>b.onclick=()=>openAcct(b.dataset.aid));
-  document.querySelectorAll("#acct-body [data-acct-del], #acct-test-body [data-acct-del]").forEach(b=>b.onclick=async()=>{
+  document.querySelectorAll("#acct-body [data-aid], #acct-official-body [data-aid], #acct-test-body [data-aid]").forEach(b=>b.onclick=()=>openAcct(b.dataset.aid));
+  document.querySelectorAll("#acct-body [data-acct-del], #acct-official-body [data-acct-del], #acct-test-body [data-acct-del]").forEach(b=>b.onclick=async()=>{
     if(!requireAuth())return;
     const id=b.dataset.acctDel;
     const row=d.rows.find(x=>String(x.id)===String(id));
@@ -2260,8 +2280,9 @@ function bind(){
   document.querySelectorAll(".acct-filter [data-acct-filter]").forEach(b=>b.onclick=()=>{
     const f=b.dataset.acctFilter;
     document.querySelectorAll(".acct-filter [data-acct-filter]").forEach(x=>x.classList.toggle("active",x===b));
-    const real=document.getElementById("acct-real-card"), test=document.getElementById("acct-test-card");
+    const real=document.getElementById("acct-real-card"), official=document.getElementById("acct-official-card"), test=document.getElementById("acct-test-card");
     if(real)real.style.display=(f==="real"||f==="all")?"block":"none";
+    if(official)official.style.display=(f==="official"||f==="all")?"block":"none";
     if(test)test.style.display=(f==="test"||f==="all")?"block":"none";
   });
   document.getElementById("btn-query").onclick=()=>{ledgerPage=1;loadLedger();};
@@ -2368,9 +2389,11 @@ function bind(){
   document.getElementById("btn-vio-add").onclick=()=>openVio(null);
   document.getElementById("vio-cancel").onclick=()=>document.getElementById("modal-vio").classList.remove("show");
   document.getElementById("vio-save").onclick=saveVio;
-  // 管理员管理（仅超级管理员，按钮本身由 data-superadmin 控制可见性；含管辖范围选择）
-  document.getElementById("btn-am-grant").onclick=()=>adminSet(true);
-  document.getElementById("btn-am-revoke").onclick=()=>adminSet(false);
+  // 管理员管理筛选（仅超级管理员）
+  const amFilter=document.getElementById("btn-am-filter");
+  if(amFilter)amFilter.onclick=loadAdminMgmt;
+  const amReset=document.getElementById("btn-am-reset");
+  if(amReset)amReset.onclick=()=>{document.getElementById("am-filter-kw").value="";document.getElementById("am-filter-role").value="";document.getElementById("am-filter-official").value="";refreshCustomSelect("am-filter-role");refreshCustomSelect("am-filter-official");loadAdminMgmt();};
   // 新建账号（仅超级管理员）
   const naBtn=document.getElementById("btn-new-account");
   if(naBtn)naBtn.onclick=()=>{
@@ -2386,8 +2409,6 @@ function bind(){
   if(naCancel)naCancel.onclick=()=>document.getElementById("modal-new-account").classList.remove("show");
   const naSave=document.getElementById("na-save");
   if(naSave)naSave.onclick=createAccount;
-  const amRoleSel=document.getElementById("am-role");
-  if(amRoleSel)amRoleSel.addEventListener("change",updateAmScope);
   document.getElementById("am-scope-cancel").onclick=()=>{amPending=null;document.getElementById("modal-am-scope").classList.remove("show");};
   document.getElementById("am-scope-ok").onclick=async()=>{
     if(!amPending)return;

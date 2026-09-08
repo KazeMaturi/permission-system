@@ -165,19 +165,18 @@ async function loadSystem(){
       img.src=TOKEN?img.dataset.src+"?token="+encodeURIComponent(TOKEN):img.dataset.src;
     }
   });
-  // 账号登录情况（仅超级管理员）
-  const loginCard=document.getElementById("sys-login-card");
-  if(loginCard){
-    if(ME&&ME.is_super_admin){
-      loginCard.style.display="block";
-      const d=await API("/api/login-logs");
-      const rows=(d&&d.rows)||[];
-      document.getElementById("sys-login-body").innerHTML=rows.length?rows.map(r=>`<tr>
-        <td>${escMsg(r.account_id)}</td><td>${escMsg(r.login_time||"")}</td>
-        <td>${escMsg(r.ip||"—")}</td><td>${escMsg(r.device_id||"—")}</td>
-        <td class="wrap" style="max-width:320px">${escMsg(r.user_agent||"—")}</td></tr>`).join(""):'<tr><td colspan="5" class="empty">暂无登录记录</td></tr>';
-    } else loginCard.style.display="none";
-  }
+}
+// ---------- 账号登录情况（系统管理二级页，仅超级管理员） ----------
+async function loadLoginLogs(){
+  if(!(ME&&ME.is_super_admin)) return;
+  const d=await API("/api/login-logs");
+  const rows=(d&&d.rows)||[];
+  const body=document.getElementById("sys-login-body");
+  if(!body) return;
+  body.innerHTML=rows.length?rows.map(r=>`<tr>
+    <td>${escMsg(r.account_id)}</td><td>${escMsg(r.login_time||"")}</td>
+    <td>${escMsg(r.ip||"—")}</td><td>${escMsg(r.device_id||"—")}</td>
+    <td class="wrap" style="max-width:320px">${escMsg(r.user_agent||"—")}</td></tr>`).join(""):'<tr><td colspan="5" class="empty">暂无登录记录</td></tr>';
 }
 function openFlowPreview(n){
   const map={"1":["图1_评审报名申请流程.png","图1 评审报名申请流程"],"2":["图2_升级与分类扩充流程.png","图2 升级与分类扩充流程"],"3":["图3_日常考核流程.png","图3 日常考核流程"],"4":["图4_违规惩处与申述流程.png","图4 违规惩处与申述流程"]};
@@ -1400,7 +1399,7 @@ async function loadAdminMgmt(){
   document.getElementById("am-acct-list").innerHTML=(d.rows||[]).map(r=>'<option value="'+r.account_id+'"></option>').join("");
   const rows=d.rows||[];
   document.getElementById("am-body").innerHTML=rows.length?rows.map(r=>{
-    const isAdm=!!r.is_admin, isSA=!!r.is_super_admin;
+    const isAdm=!!r.is_admin, isSA=!!r.is_super_admin, isOff=!!r.is_official;
     const myRoles=(r.roles||[]).filter(x=>x.status==='在任'&&(roles.includes(x.role))).map(x=>x.role+(x.scope?'<span class="muted">·'+escMsg(x.scope)+'</span>':''));
     let acts="";
     if(ME&&ME.is_super_admin){
@@ -1415,10 +1414,11 @@ async function loadAdminMgmt(){
       <td><span class="pill ${LEVEL_CLASS[r.level]||'n'}">${r.level||""}</span></td>
       <td><span class="pill ${STATUS_CLASS[r.status]||'n'}">${r.status||""}</span></td>
       <td>${isAdm?'<span class="pill g">是</span>':'<span class="muted">否</span>'}</td>
-      <td>${isSA?'<span class="pill" style="background:#7c2d12;color:#fff">是（Adzwlqxm）</span>':'<span class="muted">否</span>'}</td>
+      <td>${isSA?'<span class="pill" style="background:#7c2d12;color:#fff">是</span>':'<span class="muted">否</span>'}</td>
+      <td>${isOff?'<span class="pill" style="background:#1d4ed8;color:#fff">是</span>':'<span class="muted">否</span>'}</td>
       <td>${myRoles.length?myRoles.map(x=>'<span class="tag">'+x+'</span>').join(" "):'<span class="muted">—</span>'}</td>
       <td>${acts}</td></tr>`;
-  }).join(""):'<tr><td colspan="7" class="empty">暂无账号</td></tr>';
+  }).join(""):'<tr><td colspan="8" class="empty">暂无账号</td></tr>';
   document.querySelectorAll("#am-body [data-am-toggle]").forEach(b=>b.onclick=async()=>{
     if(!requireAuth())return;
     const target=b.dataset.amToggle, role=b.dataset.role, grant=b.dataset.grant==="1";
@@ -1442,6 +1442,24 @@ async function adminSet(grant){
   const res=await fetch(grant?"/api/admin/grant":"/api/admin/revoke",{method:"POST",headers:j(),body:JSON.stringify({account_id:target,role:role,scope:scope})}).then(x=>x.json());
   if(res.error){await UI.alert("操作失败："+res.error);return;}
   document.getElementById("am-tip").textContent=(grant?"已设为":"已取消")+"管理员："+target+" / "+role+(scope?("·"+scope):"");
+  loadAdminMgmt();
+}
+async function createAccount(){
+  if(!requireAuth())return;
+  const account_id=val("na-account").trim();
+  if(!account_id){await UI.alert("请填写账号");return;}
+  const body={
+    account_id,
+    display_name:val("na-name").trim(),
+    password:val("na-pw").trim(),
+    level:val("na-level"),
+    is_official:document.getElementById("na-official").checked,
+    is_admin:document.getElementById("na-admin").checked
+  };
+  const res=await fetch("/api/accounts",{method:"POST",headers:j(),body:JSON.stringify(body)}).then(x=>x.json());
+  if(res.error){await UI.alert("创建失败："+res.error);return;}
+  document.getElementById("modal-new-account").classList.remove("show");
+  await UI.alert("已创建账号："+account_id+(body.is_official?"（官方账号·管理员级别）":(body.is_admin?"（管理员级别）":"")));
   loadAdminMgmt();
 }
 
@@ -2059,7 +2077,7 @@ async function doLogin(){const acc=document.getElementById("lg-account").value.t
   if(document.getElementById("page-system").classList.contains("active")){ loadSystem(); showToast("登录成功："+res.account_id+(res.is_reviewer?"（审核员）":""),"ok"); }
   else { showToast("登录成功，正在刷新页面…","ok"); location.reload(); }
 }
-function doLogout(){setToken(null); ME=null; renderUser(); if(["page-dict","page-logs","page-audit"].some(id=>document.getElementById(id)?.classList.contains("active"))) showPage("overview"); showToast("已退出登录","info");}
+function doLogout(){setToken(null); ME=null; renderUser(); if(["page-dict","page-logs","page-audit","page-logins"].some(id=>document.getElementById(id)?.classList.contains("active"))) showPage("overview"); showToast("已退出登录","info");}
 function openChangePw(){
   if(!ME||!ME.account_id){showToast("请先登录后再修改密码","warn"); return;}
   document.getElementById("modal-login").classList.remove("show");
@@ -2182,7 +2200,7 @@ function checkPwStrength(){
 // ---------- 工具 ----------
 function j(){const h={"Content-Type":"application/json"}; if(TOKEN) h["Authorization"]="Bearer "+TOKEN; return h;}
 function showPage(p){
-  const groupOf=(page)=>{if(["ledger"].includes(page))return "perm"; if(["overview","dict","logs","audit","permsort"].includes(page))return "sys"; return null;};
+  const groupOf=(page)=>{if(["ledger"].includes(page))return "perm"; if(["overview","dict","logs","audit","permsort","logins"].includes(page))return "sys"; return null;};
   const primary=(page)=>groupOf(page)||page;
   const pri=primary(p);
   document.querySelectorAll(".navbtn").forEach(b=>b.classList.toggle("active",b.dataset.page===pri));
@@ -2193,7 +2211,7 @@ function showPage(p){
   }
   document.querySelectorAll(".subbtn").forEach(b=>b.classList.toggle("active",b.dataset.page===p));
   document.querySelectorAll(".page").forEach(s=>s.classList.toggle("active",s.id==="page-"+p));
-  const _map={overview:loadOverview,ledger:loadLedger,assess:()=>showSub("edit"),apply:()=>showApplySub("newapply"),discipline:()=>showDiscSub("violation"),audit:loadAudit,logs:loadLogs,dict:()=>showDictSub("accts"),myperms:loadMyPerms,permsort:loadPermSort,inbox:()=>showInboxSub("inbox"),system:loadSystem};if(_map[p])_map[p]();
+  const _map={overview:loadOverview,ledger:loadLedger,assess:()=>showSub("edit"),apply:()=>showApplySub("newapply"),discipline:()=>showDiscSub("violation"),audit:loadAudit,logs:loadLogs,dict:()=>showDictSub("accts"),myperms:loadMyPerms,permsort:loadPermSort,inbox:()=>showInboxSub("inbox"),system:loadSystem,logins:loadLoginLogs};if(_map[p])_map[p]();
 }
 function showDictSub(sub){document.querySelectorAll("#page-dict .subtab").forEach(b=>b.classList.toggle("active",b.dataset.dict===sub));
   document.getElementById("dict-accts").style.display=sub==="accts"?"block":"none";document.getElementById("dict-cats").style.display=sub==="cats"?"block":"none";document.getElementById("dict-admin").style.display=sub==="admin"?"block":"none";
@@ -2253,6 +2271,7 @@ function bind(){
   document.getElementById("btn-add").onclick=()=>openEdit(null);
   document.getElementById("btn-import").onclick=()=>{document.getElementById("imp-text").value="";document.getElementById("imp-result").textContent="";document.getElementById("modal-import").classList.add("show");};
   document.getElementById("btn-export").onclick=()=>window.location.href="/api/export?"+new URLSearchParams(lf()).toString();
+  const loginRefresh=document.getElementById("btn-loginlog-refresh"); if(loginRefresh) loginRefresh.onclick=()=>loadLoginLogs();
   document.getElementById("btn-stats-export").onclick=()=>window.location.href="/api/export?"+new URLSearchParams({dim:val("s-dim")}).toString();
   document.getElementById("s-dim").onchange=loadStats;
   document.getElementById("edit-cancel").onclick=()=>document.getElementById("modal-edit").classList.remove("show");
@@ -2352,6 +2371,21 @@ function bind(){
   // 管理员管理（仅超级管理员，按钮本身由 data-superadmin 控制可见性；含管辖范围选择）
   document.getElementById("btn-am-grant").onclick=()=>adminSet(true);
   document.getElementById("btn-am-revoke").onclick=()=>adminSet(false);
+  // 新建账号（仅超级管理员）
+  const naBtn=document.getElementById("btn-new-account");
+  if(naBtn)naBtn.onclick=()=>{
+    ["na-account","na-name","na-pw"].forEach(id=>document.getElementById(id).value="");
+    document.getElementById("na-level").value="中审";
+    document.getElementById("na-official").checked=false;
+    document.getElementById("na-admin").checked=true;
+    document.getElementById("modal-new-account").classList.add("show");
+  };
+  const naOfficial=document.getElementById("na-official");
+  if(naOfficial)naOfficial.onchange=()=>{ if(naOfficial.checked) document.getElementById("na-admin").checked=true; };
+  const naCancel=document.getElementById("na-cancel");
+  if(naCancel)naCancel.onclick=()=>document.getElementById("modal-new-account").classList.remove("show");
+  const naSave=document.getElementById("na-save");
+  if(naSave)naSave.onclick=createAccount;
   const amRoleSel=document.getElementById("am-role");
   if(amRoleSel)amRoleSel.addEventListener("change",updateAmScope);
   document.getElementById("am-scope-cancel").onclick=()=>{amPending=null;document.getElementById("modal-am-scope").classList.remove("show");};

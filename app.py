@@ -141,7 +141,16 @@ def is_senior(conn, account_id):
 # 高于 is_admin，仅在必要时（授权管理）使用的精英账号集合。
 SUPER_ADMIN_ACCOUNTS = {"Adzwlqxm"}
 def is_super_admin(conn, account_id):
-    return bool(account_id) and account_id in SUPER_ADMIN_ACCOUNTS
+    """超级管理员：默认 Adzwlqxm，或经 admin_grant 能力授予的账号。
+
+    注意：不得通过 has_cap(admin_grant) 判定，否则会与 CAPS 中 admin_grant 的
+    base=is_super_admin 形成互相递归（RecursionError）。此处直接查 account_capability。"""
+    if not account_id:
+        return False
+    if account_id in SUPER_ADMIN_ACCOUNTS:
+        return True
+    r = conn.execute("SELECT 1 FROM account_capability WHERE account_id=? AND capability='admin_grant' AND granted=1", (account_id,)).fetchone()
+    return bool(r)
 
 def get_eval_roles(conn, account_id):
     """返回账号在 eval_role_assign 中绑定的评审角色列表；超级管理员额外隐含「评审相关负责人」权限。"""
@@ -827,6 +836,19 @@ def init_db():
         cur = c.execute("SELECT password FROM account WHERE account_id=?", (aid,)).fetchone()[0]
         if not cur or cur == wrong_pw:
             c.execute("UPDATE account SET password=? WHERE account_id=?", (default_pw(aid), aid))
+    # 迁移：账号官方标识列（官方账号不归属评审，默认管理员级别）
+    if "is_official" not in {x[1] for x in c.execute("PRAGMA table_info(account)")}:
+        c.execute("ALTER TABLE account ADD COLUMN is_official INTEGER DEFAULT 0")
+    # 迁移：首个官方账号（du曦尧）自动创建为官方账号且默认管理员级别（admin_grant 能力）
+    if not c.execute("SELECT 1 FROM account WHERE account_id=?", ("du曦尧",)).fetchone():
+        now = _now()
+        c.execute("""INSERT INTO account(account_id,display_name,password,level,status,is_test,is_official,join_date)
+                     VALUES(?,'du曦尧',?,'中审','正常',0,1,?)""",
+                  ("du曦尧", default_pw("du曦尧"), now))
+        c.execute("""INSERT INTO account_capability(account_id,capability,granted,operator,reason,created_at,updated_at)
+                     VALUES('du曦尧','admin_grant',1,'系统初始化','首个官方账号（默认管理员级别）',?,?)""", (now, now))
+        c.execute("INSERT INTO change_log(permission_id,action,account_id,operator,change_time,detail) VALUES(?,?,?,?,?,?)",
+                  (0, "新建账号", "du曦尧", "系统初始化", now, "自动创建首个官方账号 du曦尧（官方账号·默认管理员级别）"))
     # 迁移：旧 official_list（单人员-任务登记） -> 官方任务包 + 成员关系表
     ocols = {x[1] for x in c.execute("PRAGMA table_info(official_list)")}
     new_pkg_empty = c.execute("SELECT COUNT(*) FROM official_task_package").fetchone()[0] == 0
@@ -1057,7 +1079,7 @@ def build_where(filters):
         clauses.append("p.effect_date>=?"); params.append(filters["effect_from"])
     if filters.get("effect_to"):
         clauses.append("p.effect_date<=?"); params.append(filters["effect_to"])
-    if "recycled" in filters:
+    if filters.get("recycled") is not None:
         clauses.append("p.recycled=?"); params.append(int(filters["recycled"]))
     if filters.get("only_active"):
         clauses.append("p.status IN (%s)" % ",".join("?" * len(ACTIVE_PERM))); params.extend(ACTIVE_PERM)
@@ -1558,9 +1580,7 @@ class Handler(BaseHTTPRequestHandler):
                 w.writerow(["申请等级","报名时间","百科ID","QQ","推荐人百科ID","报名分类","报名条件","备注","当前流程节点","节点操作时间","评估结果","评估结果时间","评估人","操作人"])
                 for r in rows:
                     w.writerow([r["apply_level"],r["apply_time"],r["apply_id"],r["qq"],r["referrer"],r["category"],r["condition_type"],r["note"],r["eval_node"],r["eval_node_time"],r["eval_result"],r["eval_result_time"],r["evaluator"],r["operator"]])
-                data = ("\ufeff" + buf.getvalue()).encode("utf-8-sig")
-                self.send_response(200); self.send_header("Content-Type", "text/csv; charset=utf-8-sig")
-                self.send_header("Content-Disposition", "attachment; filename=application_report.csv")
+                data = ("\ufeff" + buf.getvalue()).encode("utf-8")
                 return self._send(200, body=data, ctype="text/csv; charset=utf-8-sig",
                                   headers={"Content-Disposition": "attachment; filename=application_report.csv"})
             if path == "/api/export":
@@ -1652,10 +1672,11 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/admin/accounts":
                 if not has_cap(conn, self._auth_account(conn), "admin_grant"):
                     return self._send(403, {"error": "无权限：仅超级管理员可查看"})
-                rows = conn.execute("SELECT account_id, display_name, level, status FROM account ORDER BY account_id").fetchall()
+                rows = conn.execute("SELECT account_id, display_name, level, status, is_official FROM account ORDER BY account_id").fetchall()
                 out = []
                 for r in rows:
                     d = dict(r)
+                    d["is_official"] = bool(r["is_official"])
                     d["is_admin"] = is_admin(conn, r["account_id"])
                     d["is_super_admin"] = is_super_admin(conn, r["account_id"])
                     d["roles"] = [dict(x) for x in conn.execute("SELECT role,status,scope FROM leader_record WHERE account_id=?", (r["account_id"],)).fetchall()]
@@ -1862,9 +1883,7 @@ class Handler(BaseHTTPRequestHandler):
         w.writerow(["ID","账号","昵称","领域(部门)","二级组","分类","等级","状态","生效","失效","来源","版本","操作人","创建时间","已回收"])
         for r in rows:
             w.writerow([r["id"],r["account_id"],r["display_name"],r["domain"],r["group_name"],r["category"],r["level"],r["status"],r["effect_date"],r["expire_date"],r["source"],r["system_version"],r["operator"],r["created_at"],r["recycled"]])
-        data = ("\ufeff" + buf.getvalue()).encode("utf-8-sig")
-        self.send_response(200); self.send_header("Content-Type", "text/csv; charset=utf-8-sig")
-        self.send_header("Content-Disposition", "attachment; filename=permission_report.csv")
+        data = ("\ufeff" + buf.getvalue()).encode("utf-8")
         return self._send(200, body=data, ctype="text/csv; charset=utf-8-sig",
                           headers={"Content-Disposition": "attachment; filename=permission_report.csv"})
 
@@ -1949,6 +1968,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._change_pw(conn, aid, body)
             if parsed.path == "/api/accounts/reset-password":
                 return self._reset_password(conn, aid, body)
+            # 超级管理员：直接创建账号（支持官方账号，默认管理员级别）
+            if parsed.path == "/api/accounts":
+                return self._create_account(conn, aid, body)
             # 敏感写操作需管理角色（各路径映射到具体系统功能权限；超级管理员单独授予亦生效）
             ADMIN_PATHS = {"/api/permissions": "perm_manage", "/api/permissions/import": "perm_manage",
                            "/api/assess/config": "assess_manage", "/api/assess/import": "assess_manage",
@@ -4362,6 +4384,38 @@ class Handler(BaseHTTPRequestHandler):
                      (0, "重置密码", target, aid, now, "超级管理员 %s 为账号 %s 重置 12 位随机密码" % (aid, target)))
         conn.commit()
         return self._send(200, {"ok": True, "new_password": new_pw})
+
+    # ---- 超级管理员：直接创建账号（含官方账号，默认管理员级别） ----
+    def _create_account(self, conn, aid, b):
+        if not is_super_admin(conn, aid):
+            return self._send(403, {"error": "无权限：仅超级管理员可直接创建账号"})
+        account_id = (b.get("account_id") or "").strip()
+        if not account_id:
+            return self._send(400, {"error": "账号为必填"})
+        if conn.execute("SELECT 1 FROM account WHERE account_id=?", (account_id,)).fetchone():
+            return self._send(409, {"error": "账号已存在：%s" % account_id})
+        display_name = (b.get("display_name") or "").strip() or account_id
+        pw = (b.get("password") or "").strip()
+        is_official = 1 if b.get("is_official") else 0
+        is_admin = bool(b.get("is_admin"))
+        if is_official:
+            is_admin = True  # 官方账号默认管理员级别
+        level = (b.get("level") or "中审").strip()
+        if level not in ACCOUNT_LEVELS:
+            level = "中审"
+        now = _now()
+        conn.execute("""INSERT INTO account(account_id,display_name,password,level,status,is_test,is_official,join_date)
+                       VALUES(?,?,?,?, '正常',0,?,?)""",
+                     (account_id, display_name, default_pw(account_id) if not pw else hash_pw(pw), level, is_official, now))
+        if is_admin:
+            conn.execute("""INSERT INTO account_capability(account_id,capability,granted,operator,reason,created_at,updated_at)
+                           VALUES(?, 'admin_grant',1,?,?,?,?)""",
+                         (account_id, aid, "新建官方账号时默认授予管理员级别" if is_official else "新建账号时授予管理员", now, now))
+        conn.execute("INSERT INTO change_log(permission_id,action,account_id,operator,change_time,detail) VALUES(?,?,?,?,?,?)",
+                     (0, "新建账号", account_id, aid, now,
+                      "超级管理员 %s 创建账号 %s（官方账号：%s；管理员：%s）" % (aid, account_id, "是" if is_official else "否", "是" if is_admin else "否")))
+        conn.commit()
+        return self._send(200, dict(ok=True, account_id=account_id, is_official=bool(is_official), is_admin=is_admin))
 
     # ---- 评审量分类明细（主/副分类判定数据源）----
     def _set_cat_detail(self, conn, body):

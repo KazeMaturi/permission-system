@@ -28,6 +28,7 @@
   <button class="subbtn" data-page="permsort">权限汇总</button>
   <button class="subbtn" data-page="logs">变更日志</button>
   <button class="subbtn" data-page="audit">数据质量检查</button>
+  <button class="subbtn" data-page="logins" data-superadmin="1">登录情况</button>
 </nav>
 
 <main>
@@ -114,8 +115,16 @@
         </div>
       </div>
     </div>
-    <div class="card" id="sys-login-card" style="display:none" data-superadmin="1">
-      <h3><span class="dot"></span>账号登录情况<small style="color:var(--sub)">（仅超级管理员可见；设备码为登录设备浏览器指纹，IP 为登录来源地址）</small></h3>
+  </section>
+
+  <!-- 系统管理：账号登录情况（仅超级管理员） -->
+  <section id="page-logins" class="page">
+    <div class="pagetitle">账号登录情况<small>设备码为登录设备浏览器指纹，IP 为登录来源地址；仅超级管理员可见</small></div>
+    <div class="card">
+      <div class="toolbar">
+        <span class="spacer"></span>
+        <button class="btn ghost" id="btn-loginlog-refresh">刷新</button>
+      </div>
       <div class="table-wrap">
         <table><thead><tr><th>账号</th><th>登录时间</th><th>IP 地址</th><th>设备码</th><th>浏览器/系统</th></tr></thead><tbody id="sys-login-body"></tbody></table>
       </div>
@@ -353,11 +362,12 @@
           <label id="am-scope-label" style="display:none">管辖范围<select id="am-scope"></select></label>
           <button class="btn primary" id="btn-am-grant">设为管理员</button>
           <button class="btn ghost" id="btn-am-revoke">取消管理员</button>
+          <button class="btn" id="btn-new-account" data-superadmin="1">+ 新建账号</button>
           <span class="spacer"></span>
           <span class="muted" id="am-tip"></span>
         </div>
         <table id="am-table"><thead><tr>
-          <th>账号</th><th>等级</th><th>状态</th><th>是否管理员</th><th>是否超级管理员</th><th>现任管理角色</th><th>操作</th>
+          <th>账号</th><th>等级</th><th>状态</th><th>是否管理员</th><th>是否超级管理员</th><th>是否官方账号</th><th>现任管理角色</th><th>操作</th>
         </tr></thead><tbody id="am-body"></tbody></table>
       </div>
       <p class="hint" style="margin-top:14px">评审角色绑定（原「评审角色绑定」页签已并入此处）：将评审三类角色（分类小组长 / 所属大团队质量组长 / 评审相关负责人）绑定到具体人员账号与分类（分类留空表示适用全部分类）；<b>升级中审 / 分类扩充</b>等申请的多角色评估流程按此绑定分工、不可跨权。</p>
@@ -1257,6 +1267,24 @@
 <div class="modal" id="modal-confirm"><div class="modal-box"><h3 id="cf-title">确认</h3><p id="cf-text"></p><div class="modal-actions"><button class="btn ghost" id="cf-cancel">取消</button><button class="btn primary" id="cf-ok">确认</button></div></div></div>
 <!-- 统一输入弹窗（替代 prompt） -->
 <div class="modal" id="modal-prompt"><div class="modal-box"><h3 id="pm-title">输入</h3><p id="pm-text"></p><input id="pm-input" type="text" placeholder=""><div class="modal-actions"><button class="btn ghost" id="pm-cancel">取消</button><button class="btn primary" id="pm-ok">确认</button></div></div></div>
+
+<!-- 新建账号（仅超级管理员） -->
+<div class="modal" id="modal-new-account"><div class="modal-box">
+  <h3>新建账号</h3>
+  <p class="hint">仅超级管理员可创建账号。官方账号不归属评审，默认管理员级别（具备管理员权限）。</p>
+  <div class="form">
+    <label>账号（百科 ID）<input id="na-account" type="text" placeholder="必填，唯一" autocomplete="off"></label>
+    <label>昵称（可选）<input id="na-name" type="text" placeholder="留空则等同账号" autocomplete="off"></label>
+    <label>初始密码（可选）<input id="na-pw" type="text" placeholder="留空=默认 账号@2026" autocomplete="off"></label>
+    <label>等级<select id="na-level"><option value="初审">初审</option><option value="中审" selected>中审</option><option value="高审">高审</option></select></label>
+    <label class="chk"><input type="checkbox" id="na-official"> 官方账号（不归属评审）</label>
+    <label class="chk"><input type="checkbox" id="na-admin" checked> 管理员级别（默认开通管理员权限）</label>
+  </div>
+  <div class="modal-actions">
+    <button class="btn ghost" id="na-cancel">取消</button>
+    <button class="btn primary" id="na-save">创建账号</button>
+  </div>
+</div></div>
 
 <script src="/static/app.js"></script>
 <div id="toast" class="toast" style="display:none"><span id="toast-text"></span></div>

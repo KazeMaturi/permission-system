@@ -235,7 +235,7 @@ async function loadMatrix(){
       <div class="matrix-cell" data-label="账号等级"><span class="pill ${LEVEL_CLASS[r.acct_level]||'n'}">${r.acct_level}</span></div>
       <div class="matrix-cell" data-label="状态"><span class="pill ${STATUS_CLASS[r.acct_status]||'n'}">${r.acct_status}</span></div>
       <div class="matrix-cell perms" data-label="权限分布">${domains}</div>
-      <div class="matrix-cell" data-label="操作">${ME?`<button class="linkbtn" data-edit-acct="${r.account_id}">编辑账号</button><br>`:''}<button class="linkbtn" data-expand="${r.account_id}">展开</button></div>
+      <div class="matrix-cell" data-label="操作">${ME?`<button class="linkbtn" data-edit-acct="${r.account_id}">编辑账号</button><br>`:''}<button class="linkbtn" data-expand="${r.account_id}" data-lc="${r.acct_status||''}">展开</button></div>
     </div>
     <div class="matrix-detail" id="md-${r.account_id}" style="display:none"></div>`;
   }).join("");
@@ -250,14 +250,23 @@ async function loadMatrix(){
   document.querySelectorAll("#matrix-body [data-edit-acct]").forEach(b=>b.onclick=()=>openAcctByAid(b.dataset.editAcct));
   // 展开/折叠
   document.querySelectorAll("#matrix-body [data-expand]").forEach(b=>b.onclick=async()=>{
-    const aid=b.dataset.expand, box=document.getElementById("md-"+aid);
+    const aid=b.dataset.expand, lc=b.dataset.lc||"", box=document.getElementById("md-"+aid);
     if(box.style.display==="block"){box.style.display="none"; b.textContent="展开"; return;}
+    // 生命周期感知：已退出/待确认/永封 无有效权限，不展开空信息
+    if(["退出","待确认","永封"].includes(lc)){
+      box.innerHTML=`<div class="muted" style="padding:8px 4px">该账号生命周期为「${lc}」，无有效评审权限。</div>`;
+      box.style.display="block"; b.textContent="折叠"; return;
+    }
     const pd=await API("/api/permissions?account_id="+encodeURIComponent(aid)+"&size=2000");
-    box.innerHTML='<table class="mini"><thead><tr><th>分类</th><th>二级组</th><th>领域</th><th>状态</th><th>操作</th></tr></thead><tbody>'+
-      pd.rows.map(p=>{
+    let head="";
+    if(lc==="待复权") head=`<div class="muted" style="padding:8px 4px">该账号权限处于「待复权（已暂停）」状态，恢复前不可执行评审动作。</div>`;
+    const rowsHtml=(pd.rows&&pd.rows.length)?pd.rows.map(p=>{
         const isRec=p.status==="已回收";
+        const cat=p.category?escMsg(p.category):'<span class="muted">（无分类·初审）</span>';
         const btn=ME?(isRec?`<button class="linkbtn" data-restore="${p.id}">恢复</button>`:`<button class="linkbtn del" data-del="${p.id}">回收</button>`):'';
-        return `<tr><td>${p.category}</td><td>${p.group_name||""}</td><td>${p.domain||""}</td><td><span class="pill ${STATUS_CLASS[p.status]||'n'}">${p.status}</span></td><td>${ME?`<button class="linkbtn" data-edit="${p.id}">改</button>`:''}${btn}</td></tr>`;}).join("")+'</tbody></table>';
+        return `<tr><td>${cat}</td><td>${p.group_name||""}</td><td>${p.domain||""}</td><td><span class="pill ${STATUS_CLASS[p.status]||'n'}">${p.status}</span></td><td>${ME?`<button class="linkbtn" data-edit="${p.id}">改</button>`:''}${btn}</td></tr>`;}).join(""):
+      '<tr><td colspan="5" class="empty">无权限记录</td></tr>';
+    box.innerHTML=head+'<table class="mini"><thead><tr><th>分类</th><th>二级组</th><th>领域</th><th>状态</th><th>操作</th></tr></thead><tbody>'+rowsHtml+'</tbody></table>';
     box.style.display="block"; b.textContent="折叠";
     box.querySelectorAll("[data-edit]").forEach(b=>b.onclick=()=>openEdit(b.dataset.edit));
     box.querySelectorAll("[data-del]").forEach(b=>b.onclick=()=>recycle(b.dataset.del));
@@ -1529,8 +1538,9 @@ function renderAcctCard(r){
   const isOff=!!r.is_official, isAdm=!!r.is_admin, isSA=!!r.is_super_admin, isTest=!!r.is_test;
   const sa = ME && ME.is_super_admin;
   const badges=[];
+  const lc = r.lifecycle || r.status || '正常';
   badges.push(`<span class="pill ${LEVEL_CLASS[r.level]||'n'}">${r.level||''}</span>`);
-  badges.push(`<span class="pill ${STATUS_CLASS[r.status]||'n'}">${r.status||''}</span>`);
+  badges.push(`<span class="pill ${STATUS_CLASS[lc]||'n'}">${lc}</span>`);
   if(isOff) badges.push(`<span class="pill" style="background:#1d4ed8;color:#fff">官方</span>`);
   if(isAdm) badges.push(`<span class="pill g">管理员</span>`);
   if(isSA) badges.push(`<span class="pill" style="background:#7c2d12;color:#fff">超级管理员</span>`);

@@ -77,6 +77,12 @@ def main(dry_run=True):
     return changes
 
 if __name__ == "__main__":
+    # 已弃用：此脚本会把括号标记并入 account_id，会造成重复账号（已被 repair_markers.py 纠正）。
+    # 仅保留 --legacy 以兼容历史回放，默认拒绝执行以免重新污染数据。
+    if "--legacy" not in sys.argv:
+        print("⚠️ 已弃用：括号是标记不是名字，请用 repair_markers.py 做数据清洗。")
+        print("如需强制运行旧逻辑，加 --legacy 参数。")
+        raise SystemExit(0)
     dry = "--apply" not in sys.argv
     changes = main(dry_run=dry)
     print("DRY RUN:" if dry else "APPLIED:")

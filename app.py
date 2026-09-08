@@ -38,6 +38,8 @@ ACCOUNT_STATUSES = ["正常", "考核期", "见习", "实习", "待复权", "停
 ACTIVE_PERM = {"正常", "考核期", "见习", "实习", "待复权"}
 # 账号状态是否视为“正常有效”
 ACTIVE_ACCT = {"正常", "考核期", "见习", "实习", "待复权"}
+# 生命周期（标记）→ 不计入活跃评审权限一览/总览领域覆盖：已退出、待确认（不登记）、永封
+INACTIVE_LIFECYCLE = ("退出", "待确认", "永封")
 # 违规等级与严重等级口径
 VIOLATION_LEVELS = ["轻微问题", "一般违规", "严重违规", "重大违规"]
 SEVERE_LEVELS = ("严重违规", "重大违规")
@@ -1520,7 +1522,8 @@ class Handler(BaseHTTPRequestHandler):
                        LEFT JOIN category_dict cd ON p.category=cd.category
                        LEFT JOIN account a ON p.account_id=a.account_id
                        WHERE p.recycled=0 AND p.status IN (%s) AND COALESCE(a.is_official,0)=0
-                       GROUP BY cd.domain""" % ",".join("?" * len(ACTIVE_PERM)), tuple(ACTIVE_PERM)).fetchall()
+                       AND COALESCE(a.lifecycle,a.status) NOT IN (%s)
+                       GROUP BY cd.domain""" % (",".join("?" * len(ACTIVE_PERM)), ",".join("?" * len(INACTIVE_LIFECYCLE))), tuple(ACTIVE_PERM) + tuple(INACTIVE_LIFECYCLE)).fetchall()
                 ta = conn.execute("SELECT MAX(period) AS lp FROM assess_record").fetchone()["lp"]
                 assess = self._assess_summary(conn, ta) if ta else None
                 return self._send(200, dict(snapshot=snap,
@@ -1994,11 +1997,13 @@ class Handler(BaseHTTPRequestHandler):
         if g("recycled") in ("0","1"): filters["recycled"] = g("recycled")
         if g("only_active") == "1": filters["only_active"] = 1
         where, params = build_where(filters)
-        # 评审权限一览仅显示实际用户账号，剔除测试账号与官方账号
+        # 评审权限一览仅显示实际用户账号，剔除测试账号、官方账号与已退出/待确认/永封生命周期
         if where.strip():
-            where2 = where + " AND a.is_test=0 AND COALESCE(a.is_official,0)=0"
+            where2 = where + " AND a.is_test=0 AND COALESCE(a.is_official,0)=0 AND COALESCE(a.lifecycle,a.status) NOT IN (%s)" % ",".join("?" * len(INACTIVE_LIFECYCLE))
+            params = params + list(INACTIVE_LIFECYCLE)
         else:
-            where2 = "WHERE a.is_test=0 AND COALESCE(a.is_official,0)=0"
+            where2 = "WHERE a.is_test=0 AND COALESCE(a.is_official,0)=0 AND COALESCE(a.lifecycle,a.status) NOT IN (%s)" % ",".join("?" * len(INACTIVE_LIFECYCLE))
+            params = list(INACTIVE_LIFECYCLE)
         page = int(g("page") or 1); size = int(g("size") or 50)
         # 先统计符合条件的账号
         acct_sql = """SELECT COUNT(DISTINCT p.account_id) FROM permission p

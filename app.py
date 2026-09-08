@@ -10,6 +10,7 @@ import os
 import re
 import sqlite3
 import random
+import threading
 import csv
 import datetime
 import hashlib
@@ -21,11 +22,21 @@ import email.utils
 import email
 from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from datetime import timezone, timedelta
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 DB_PATH = os.path.join(BASE_DIR, "permission.db")
+
+# 系统时间统一使用固定 UTC+8（北京时间），不随服务器本地时区变化
+TZ_CN = timezone(timedelta(hours=8), name="CST")
+
+def _now_dt():
+    return datetime.datetime.now(TZ_CN)
+
+def _now():
+    return _now_dt().strftime("%Y-%m-%d %H:%M:%S")
 
 SYSTEM_VERSION = "V20260904B"
 
@@ -86,13 +97,13 @@ LOGIN_FAIL_WINDOW = 600   # 秒：窗口内累计
 def _login_fail_count(account_id):
     rec = LOGIN_FAILS.get(account_id)
     if not rec: return 0
-    if (datetime.datetime.now().timestamp() - rec[1]) >= LOGIN_FAIL_WINDOW:
+    if (_now_dt().timestamp() - rec[1]) >= LOGIN_FAIL_WINDOW:
         LOGIN_FAILS.pop(account_id, None)
         return 0
     return rec[0]
 def _login_fail(account_id):
     rec = LOGIN_FAILS.get(account_id)
-    now = datetime.datetime.now().timestamp()
+    now = _now_dt().timestamp()
     if not rec or (now - rec[1]) >= LOGIN_FAIL_WINDOW:
         LOGIN_FAILS[account_id] = [1, now]
     else:
@@ -108,7 +119,7 @@ def gen_token():
 def session_get(token):
     s = SESSIONS.get(token)
     if not s: return None
-    if s["expires"] < datetime.datetime.now().timestamp():
+    if s["expires"] < _now_dt().timestamp():
         SESSIONS.pop(token, None); return None
     return s["account_id"]
 def login_account(conn, account_id, password):
@@ -251,26 +262,67 @@ def resolve_scope_accounts(conn, scope_type, scope_target):
 
 
 def create_message(conn, sender, msg_type, title, body, scope_type, scope_target,
-                   source="manual", auto_rule="", accounts=None):
-    """写入消息并为每个接收人生成已读状态记录。返回 (dict(id,count,accounts), error)。"""
+                   source="manual", auto_rule="", accounts=None, send_at=""):
+    """写入消息并为每个接收人生成已读状态记录。send_at 指定未来时间则进入定时投递队列（scheduled=1），
+    暂不写入接收人，由后台调度线程到点投递。返回 (dict(id,count,accounts,scheduled[,send_at]), error)。"""
     title = (title or "").strip()
     if not title: return None, "标题不能为空"
     if msg_type not in MSG_TYPES: return None, "消息类型非法：" + str(msg_type)
     if scope_type not in MSG_SCOPES: return None, "发布范围非法：" + str(scope_type)
+    now = _now()
     if accounts is None:
         accounts, err = resolve_scope_accounts(conn, scope_type, scope_target)
         if err: return None, err
     if not accounts: return None, "接收人为空，请检查发布范围"
-    now = _now()
-    cur = conn.execute("""INSERT INTO message(msg_type,title,body,sender,scope_type,scope_target,send_time,source,auto_rule,created_at,updated_at)
-                          VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+    scheduled = 1 if (send_at and send_at > now) else 0
+    cur = conn.execute("""INSERT INTO message(msg_type,title,body,sender,scope_type,scope_target,send_time,source,auto_rule,send_at,scheduled,created_at,updated_at)
+                          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                        (msg_type, title, body or "", sender or "", scope_type, scope_target or "",
-                        now, source or "manual", auto_rule or "", now, now))
+                        send_at if scheduled else now, source or "manual", auto_rule or "",
+                        send_at if scheduled else "", scheduled, now, now))
     mid = cur.lastrowid
-    for a in accounts:
-        conn.execute("INSERT OR IGNORE INTO message_recipient(message_id,account_id,is_read,created_at) VALUES(?,?,0,?)", (mid, a, now))
+    if not scheduled:
+        for a in accounts:
+            conn.execute("INSERT OR IGNORE INTO message_recipient(message_id,account_id,is_read,created_at) VALUES(?,?,0,?)", (mid, a, now))
+        conn.commit()
+        return dict(id=mid, count=len(accounts), accounts=accounts, scheduled=False), None
+    # 定时：先不投递，由后台调度到点处理
     conn.commit()
-    return dict(id=mid, count=len(accounts), accounts=accounts), None
+    return dict(id=mid, count=len(accounts), accounts=accounts, scheduled=True, send_at=send_at), None
+
+
+def deliver_scheduled_messages():
+    """后台调度：将到点（send_at<=当前时间）的定时站内信投递给接收人，并标记 scheduled=0。"""
+    try:
+        conn = get_conn()
+        due = conn.execute("SELECT * FROM message WHERE scheduled=1 AND send_at<>'' AND send_at<=?", (_now(),)).fetchall()
+        for m in due:
+            try:
+                accounts, err = resolve_scope_accounts(conn, m["scope_type"], m["scope_target"])
+                if err or not accounts:
+                    # 范围无效：直接标记为已处理，避免反复重试
+                    conn.execute("UPDATE message SET scheduled=0, send_time=? WHERE id=?", (_now(), m["id"]))
+                    continue
+                now = _now()
+                for a in accounts:
+                    conn.execute("INSERT OR IGNORE INTO message_recipient(message_id,account_id,is_read,created_at) VALUES(?,?,0,?)", (m["id"], a, now))
+                conn.execute("UPDATE message SET scheduled=0, send_time=? WHERE id=?", (now, m["id"]))
+                conn.commit()
+            except Exception:
+                conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+def _message_scheduler_loop():
+    import time
+    while True:
+        time.sleep(30)
+        try:
+            deliver_scheduled_messages()
+        except Exception:
+            pass
 
 
 def auto_send_message(conn, auto_rule, title, body, accounts=None, scope_type="user", scope_target="", msg_type="push"):
@@ -500,7 +552,7 @@ def init_db():
     CREATE TABLE IF NOT EXISTS account(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         account_id TEXT UNIQUE,
-        display_name TEXT, level TEXT DEFAULT '中审',
+        level TEXT DEFAULT '中审',
         status TEXT DEFAULT '正常', join_date TEXT, note TEXT,
         is_test INTEGER DEFAULT 0,
         last_login_time TEXT, last_login_ip TEXT, last_login_device TEXT);
@@ -700,6 +752,15 @@ def init_db():
         is_read INTEGER DEFAULT 0,
         read_time TEXT,
         created_at TEXT);
+    CREATE TABLE IF NOT EXISTS message_template(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT,
+        msg_type TEXT DEFAULT 'push',
+        title TEXT,
+        body TEXT,
+        scope_type TEXT DEFAULT 'user',
+        created_at TEXT,
+        updated_at TEXT);
     CREATE TABLE IF NOT EXISTS eval_role_assign(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         role TEXT NOT NULL,                -- 评审角色：分类小组长 / 所属大团队质量组长 / 评审相关负责人
@@ -807,8 +868,8 @@ def init_db():
         with open(acct_csv, encoding="utf-8-sig") as f:
             for row in csv.DictReader(f):
                 aid = row["account_id"].strip()
-                c.execute("""INSERT OR IGNORE INTO account(account_id,display_name,level,status,join_date,note)
-                             VALUES(?,?, '中审','正常','2026-09-04','')""", (aid, aid))
+                c.execute("""INSERT OR IGNORE INTO account(account_id,level,status,join_date,note)
+                             VALUES(?,'中审','正常','2026-09-04','')""", (aid,))
     # 权限（以文档 〇 标记为准）
     perm_csv = os.path.join(DATA_DIR, "permissions.csv")
     if os.path.exists(perm_csv) and c.execute("SELECT COUNT(*) FROM permission").fetchone()[0] == 0:
@@ -848,8 +909,8 @@ def init_db():
     # 迁移：首个官方账号（du曦尧）自动创建为官方账号且默认管理员级别（admin_grant 能力）
     if not c.execute("SELECT 1 FROM account WHERE account_id=?", ("du曦尧",)).fetchone():
         now = _now()
-        c.execute("""INSERT INTO account(account_id,display_name,password,level,status,is_test,is_official,join_date)
-                     VALUES(?,'du曦尧',?,'中审','正常',0,1,?)""",
+        c.execute("""INSERT INTO account(account_id,password,level,status,is_test,is_official,join_date)
+                     VALUES(?,?,'中审','正常',0,1,?)""",
                   ("du曦尧", default_pw("du曦尧"), now))
         c.execute("""INSERT INTO account_capability(account_id,capability,granted,operator,reason,created_at,updated_at)
                      VALUES('du曦尧','admin_grant',1,'系统初始化','首个官方账号（默认管理员级别）',?,?)""", (now, now))
@@ -958,9 +1019,6 @@ def _seed_assess(conn, c):
                         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                       (aid, period, ptype, judgment, task, official_err, feedback, official_versions,
                        main_cat_versions, feature_edits, veto, veto_reason, "演示示例数据", "系统初始化", now, now))
-
-def _now():
-    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 # ---------------------------------------------------------------- 考核计算
 def assess_eval(values, config):
@@ -1077,8 +1135,8 @@ def build_where(filters):
         if v:
             if k == "account_id":
                 like = "%%%s%%" % v.lower()
-                clauses.append("(LOWER(p.account_id) LIKE ? OR LOWER(COALESCE(a.display_name,'')) LIKE ?)")
-                params.extend([like, like])
+                clauses.append("(LOWER(p.account_id) LIKE ?)")
+                params.extend([like])
             else:
                 clauses.append("%s=?" % mapping[k]); params.append(v)
     if filters.get("effect_from"):
@@ -1179,7 +1237,7 @@ def ip_location(ip, timeout=3):
     """返回 IP 归属地（如 中国香港），带内存缓存；内网返回 本地网络；查询失败返回空字符串。"""
     if _is_private_ip(ip):
         return "本地网络"
-    now = datetime.datetime.now().timestamp()
+    now = _now_dt().timestamp()
     cached = IP_LOC_CACHE.get(ip)
     if cached and (now - cached[1]) < IP_LOC_TTL:
         return cached[0]
@@ -1324,7 +1382,7 @@ class Handler(BaseHTTPRequestHandler):
             if cat:
                 where += " AND category=?"; params.append(cat)
             rows = conn.execute(
-                "SELECT a.*, ac.display_name FROM eval_role_assign a LEFT JOIN account ac ON a.account_id=ac.account_id %s ORDER BY a.role, a.category, a.account_id" % where,
+                "SELECT a.*, ac.account_id AS display_name FROM eval_role_assign a LEFT JOIN account ac ON a.account_id=ac.account_id %s ORDER BY a.role, a.category, a.account_id" % where,
                 params).fetchall()
             return self._send(200, dict(rows=[dict(r) for r in rows], roles=EVAL_REVIEW_ROLES))
         if method == "POST":
@@ -1373,7 +1431,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(401, {"error": f"账号或密码错误（近 {window_min} 分钟内已失败 {cnt} 次），请核对后重试"})
         _login_ok(account_id)
         token = gen_token()
-        SESSIONS[token] = {"account_id": r["account_id"], "expires": datetime.datetime.now().timestamp() + SESSION_TTL}
+        SESSIONS[token] = {"account_id": r["account_id"], "expires": _now_dt().timestamp() + SESSION_TTL}
         # 登录审计：记录 IP / 设备码 / User-Agent（系统管理-账号登录情况 仅超级管理员可见）
         try:
             ip = self.client_ip()
@@ -1532,7 +1590,7 @@ class Handler(BaseHTTPRequestHandler):
                     assess=assess, latest_period=ta))
             if path == "/api/dict":
                 cats = conn.execute("SELECT domain,group_name,category FROM category_dict ORDER BY domain,group_name,category").fetchall()
-                accts = conn.execute("SELECT account_id,display_name,level,status FROM account ORDER BY account_id").fetchall()
+                accts = conn.execute("SELECT account_id,account_id AS display_name,level,status FROM account ORDER BY account_id").fetchall()
                 return self._send(200, dict(
                     categories=[dict(domain=r["domain"], group_name=r["group_name"], category=r["category"]) for r in cats],
                     accounts=[dict(account_id=r["account_id"], display_name=r["display_name"], level=r["level"], status=r["status"]) for r in accts],
@@ -1571,7 +1629,7 @@ class Handler(BaseHTTPRequestHandler):
                 where, params = build_where(filters)
                 page = int(g("page") or 1); size = int(g("size") or 50)
                 total = conn.execute("SELECT COUNT(*) FROM permission p LEFT JOIN category_dict cd ON p.category=cd.category LEFT JOIN account a ON p.account_id=a.account_id " + where, params).fetchone()[0]
-                sql = """SELECT p.id,p.account_id,a.display_name,p.category,cd.domain,cd.group_name,p.level,p.status,
+                sql = """SELECT p.id,p.account_id,a.account_id AS display_name,p.category,cd.domain,cd.group_name,p.level,p.status,
                                 p.effect_date,p.expire_date,p.source,p.system_version,p.operator,p.created_at,p.updated_at,p.recycled,
                                 p.probation_until
                          FROM permission p LEFT JOIN category_dict cd ON p.category=cd.category LEFT JOIN account a ON p.account_id=a.account_id %s
@@ -1606,6 +1664,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._msg_list(conn, qs)
             if path == "/api/messages/groups":
                 return self._msg_groups(conn)
+            if path == "/api/message-templates":
+                aid = self._auth_account(conn)
+                return self._msg_templates(conn, aid, "GET")
             if path == "/api/inbox":
                 return self._inbox(conn, qs)
             if path == "/api/inbox/unread-count":
@@ -1627,7 +1688,7 @@ class Handler(BaseHTTPRequestHandler):
                 acct = g("account_id")
                 where = "WHERE period=?"; params = [period]
                 if acct: where += " AND account_id=?"; params.append(acct)
-                rows = conn.execute("SELECT r.*,a.display_name FROM assess_record r LEFT JOIN account a ON r.account_id=a.account_id %s ORDER BY r.account_id" % where, params).fetchall()
+                rows = conn.execute("SELECT r.*,a.account_id AS display_name FROM assess_record r LEFT JOIN account a ON r.account_id=a.account_id %s ORDER BY r.account_id" % where, params).fetchall()
                 cfg = conn.execute("SELECT * FROM assess_config ORDER BY sort_order").fetchall()
                 out = []
                 for r in rows:
@@ -1647,7 +1708,7 @@ class Handler(BaseHTTPRequestHandler):
                 where = "WHERE 1=1"; params = []
                 if period:
                     where += " AND period=?"; params.append(period)
-                rows = conn.execute("SELECT e.*,a.display_name FROM assess_exemption e LEFT JOIN account a ON e.account_id=a.account_id %s ORDER BY e.period DESC,e.account_id" % where, params).fetchall()
+                rows = conn.execute("SELECT e.*,a.account_id AS display_name FROM assess_exemption e LEFT JOIN account a ON e.account_id=a.account_id %s ORDER BY e.period DESC,e.account_id" % where, params).fetchall()
                 return self._send(200, dict(rows=[dict(r) for r in rows]))
             if path == "/api/registrations":
                 rows = conn.execute("SELECT * FROM registration ORDER BY id DESC").fetchall()
@@ -1655,7 +1716,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/assess/pending":
                 period = g("period") or conn.execute("SELECT MAX(period) FROM assess_record").fetchone()[0]
                 cfg = conn.execute("SELECT * FROM assess_config ORDER BY sort_order").fetchall()
-                rows = conn.execute("SELECT r.*,a.display_name FROM assess_record r LEFT JOIN account a ON r.account_id=a.account_id WHERE r.flow_status='已打回' AND r.period=? ORDER BY r.reject_time DESC", (period,)).fetchall()
+                rows = conn.execute("SELECT r.*,a.account_id AS display_name FROM assess_record r LEFT JOIN account a ON r.account_id=a.account_id WHERE r.flow_status='已打回' AND r.period=? ORDER BY r.reject_time DESC", (period,)).fetchall()
                 out = []
                 for r in rows:
                     d = dict(r); composite, ok, per = assess_eval(dict(d), cfg)
@@ -1775,7 +1836,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/admin/accounts":
                 if not has_cap(conn, self._auth_account(conn), "admin_grant"):
                     return self._send(403, {"error": "无权限：仅超级管理员可查看"})
-                rows = conn.execute("SELECT account_id, display_name, level, status, is_official FROM account ORDER BY account_id").fetchall()
+                rows = conn.execute("SELECT account_id, account_id AS display_name, level, status, is_official FROM account ORDER BY account_id").fetchall()
                 out = []
                 for r in rows:
                     d = dict(r)
@@ -1832,7 +1893,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, dict(rows=[dict(r) for r in rows]))
             if path == "/api/upgrade/quota":
                 rows = conn.execute(
-                    """SELECT e.apply_id AS account_id, a.display_name, substr(e.apply_time,1,7) AS mon, COUNT(*) c
+                    """SELECT e.apply_id AS account_id, a.account_id AS display_name, substr(e.apply_time,1,7) AS mon, COUNT(*) c
                        FROM category_expand e LEFT JOIN account a ON e.apply_id=a.account_id
                        GROUP BY e.apply_id, mon ORDER BY mon DESC, c DESC""").fetchall()
                 out = [dict(account_id=r["account_id"], display_name=r["display_name"], month=r["mon"],
@@ -1859,7 +1920,7 @@ class Handler(BaseHTTPRequestHandler):
         return {r["account_id"]: dict(r) for r in ex}
 
     def _review_progress(self, conn, period):
-        rows = conn.execute("""SELECT r.*, a.display_name, a.status as acct_status FROM assess_record r
+        rows = conn.execute("""SELECT r.*, a.account_id AS display_name, a.status as acct_status FROM assess_record r
             LEFT JOIN account a ON r.account_id=a.account_id WHERE r.period=?""", (period,)).fetchall()
         out = []
         any_detail = False
@@ -1922,7 +1983,7 @@ class Handler(BaseHTTPRequestHandler):
     def _assess_stats(self, conn, period):
         cfg = conn.execute("SELECT * FROM assess_config ORDER BY sort_order").fetchall()
         ex_map = self._load_exempt(conn, period)
-        rows = conn.execute("SELECT r.*, a.display_name FROM assess_record r LEFT JOIN account a ON r.account_id=a.account_id WHERE period=?", (period,)).fetchall()
+        rows = conn.execute("SELECT r.*, a.account_id AS display_name FROM assess_record r LEFT JOIN account a ON r.account_id=a.account_id WHERE period=?", (period,)).fetchall()
         results = []
         for r in rows:
             d = dict(r); composite, ok, per = assess_eval(d, cfg)
@@ -1977,16 +2038,16 @@ class Handler(BaseHTTPRequestHandler):
         filters = {k: g(k) for k in ("domain","group_name","category","perm_type","level","status","system_version","account_id","operator","effect_from","effect_to","recycled")}
         if g("only_active") == "1": filters["only_active"] = 1
         where, params = build_where(filters)
-        sql = """SELECT p.id,p.account_id,a.display_name,cd.domain,cd.group_name,p.category,p.level,p.status,
+        sql = """SELECT p.id,p.account_id,cd.domain,cd.group_name,p.category,p.level,p.status,
                         p.effect_date,p.expire_date,p.source,p.system_version,p.operator,p.created_at,p.recycled
                  FROM permission p LEFT JOIN category_dict cd ON p.category=cd.category LEFT JOIN account a ON p.account_id=a.account_id %s
                  ORDER BY p.account_id, p.category""" % where
         rows = conn.execute(sql, params).fetchall()
         import io
         buf = io.StringIO(); w = csv.writer(buf)
-        w.writerow(["ID","账号","昵称","领域(部门)","二级组","分类","等级","状态","生效","失效","来源","版本","操作人","创建时间","已回收"])
+        w.writerow(["ID","账号","领域(部门)","二级组","分类","等级","状态","生效","失效","来源","版本","操作人","创建时间","已回收"])
         for r in rows:
-            w.writerow([r["id"],r["account_id"],r["display_name"],r["domain"],r["group_name"],r["category"],r["level"],r["status"],r["effect_date"],r["expire_date"],r["source"],r["system_version"],r["operator"],r["created_at"],r["recycled"]])
+            w.writerow([r["id"],r["account_id"],r["domain"],r["group_name"],r["category"],r["level"],r["status"],r["effect_date"],r["expire_date"],r["source"],r["system_version"],r["operator"],r["created_at"],r["recycled"]])
         data = ("\ufeff" + buf.getvalue()).encode("utf-8")
         return self._send(200, body=data, ctype="text/csv; charset=utf-8-sig",
                           headers={"Content-Disposition": "attachment; filename=permission_report.csv"})
@@ -2020,7 +2081,7 @@ class Handler(BaseHTTPRequestHandler):
         if not accts:
             return self._send(200, dict(total=0, page=page, size=size, rows=[]))
         # 取这些账号的权限明细（同账号同分类只保留最新一条有效）
-        rows = conn.execute("""SELECT p.id,p.account_id,a.display_name,a.level AS acct_level,a.status AS acct_status,
+        rows = conn.execute("""SELECT p.id,p.account_id,a.account_id AS display_name,a.level AS acct_level,a.status AS acct_status,
                                       p.category,cd.domain,cd.group_name,p.level,p.status,
                                       p.effect_date,p.expire_date,p.source,p.operator
                                FROM permission p
@@ -2150,6 +2211,8 @@ class Handler(BaseHTTPRequestHandler):
             # 站内信箱：发布消息（仅超级管理员）/ 标记已读（当前接收人本人）
             if parsed.path == "/api/messages":
                 return self._post_message(conn, aid, body)
+            if parsed.path == "/api/message-templates":
+                return self._msg_templates(conn, aid, "POST", b=body)
             _m_read = re.match(r"^/api/inbox/(\d+)/read$", parsed.path)
             if _m_read:
                 return self._mark_read(conn, aid, int(_m_read.group(1)))
@@ -2194,7 +2257,7 @@ class Handler(BaseHTTPRequestHandler):
         account_id, category, level, status, ed, exd = res
         if category and conn.execute("SELECT 1 FROM permission WHERE account_id=? AND category=? AND recycled=0", (account_id,category)).fetchone():
             return self._send(409, {"error": "该账号在「%s」下已存在权限记录" % category})
-        conn.execute("INSERT OR IGNORE INTO account(account_id,display_name) VALUES(?,?)", (account_id, account_id))
+        conn.execute("INSERT OR IGNORE INTO account(account_id) VALUES(?)", (account_id,))
         now = _now()
         cur = conn.execute("""INSERT INTO permission(account_id,category,level,status,effect_date,expire_date,source,system_version,operator,created_at,updated_at)
                               VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
@@ -2220,7 +2283,7 @@ class Handler(BaseHTTPRequestHandler):
                 conn.execute("UPDATE permission SET status=?,effect_date=?,expire_date=?,operator=?,updated_at=? WHERE id=?", (status,ed,exd,p.get("operator") or "批量导入",now,dup["id"]))
                 conn.execute("INSERT INTO change_log(permission_id,action,operator,change_time,detail) VALUES(?,?,?,?,?)", (dup["id"],"修改",p.get("operator") or "批量导入",now,"批量导入更新"))
                 added += 1; continue
-            conn.execute("INSERT OR IGNORE INTO account(account_id,display_name) VALUES(?,?)", (account_id, account_id))
+            conn.execute("INSERT OR IGNORE INTO account(account_id) VALUES(?)", (account_id,))
             cur = conn.execute("""INSERT INTO permission(account_id,category,level,status,effect_date,expire_date,source,system_version,operator,created_at,updated_at)
                                   VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
                                (account_id,category,level,status,ed,exd,p.get("source") or "批量导入",b.get("system_version") or SYSTEM_VERSION,p.get("operator") or "批量导入",now,now))
@@ -2299,7 +2362,7 @@ class Handler(BaseHTTPRequestHandler):
         m = conn.execute("SELECT * FROM message WHERE id=?", (mid,)).fetchone()
         if not m: return self._send(404, {"error": "消息不存在"})
         d = dict(m)
-        recs = conn.execute("""SELECT mr.is_read, mr.read_time, mr.account_id, a.display_name
+        recs = conn.execute("""SELECT mr.is_read, mr.read_time, mr.account_id, a.account_id AS display_name
                                FROM message_recipient mr LEFT JOIN account a ON mr.account_id=a.account_id
                                WHERE mr.message_id=? ORDER BY mr.id""", (mid,)).fetchall()
         d["recipients"] = [dict(is_read=r["is_read"], read_time=r["read_time"],
@@ -2342,13 +2405,44 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(200, dict(unread=n))
 
     def _post_message(self, conn, aid, b):
-        """超级管理员发布站内信：支持系统消息 / 单独推送，单人、多账号、用户组或全体。"""
+        """超级管理员发布站内信：支持系统消息 / 单独推送，单人、多账号、用户组或全体；可指定 send_at 定时发送。"""
         if not self._need_super_admin(conn, aid): return
+        send_at = (b.get("send_at") or "").strip()
+        if send_at:
+            try:
+                # 校验时间格式（YYYY-MM-DD HH:MM:SS）
+                datetime.datetime.strptime(send_at, "%Y-%m-%d %H:%M:%S")
+            except Exception:
+                return self._send(400, {"error": "定时发送时间格式错误，应为 YYYY-MM-DD HH:MM:SS"})
         res, err = create_message(conn, aid, b.get("msg_type") or "system", b.get("title"),
                                   b.get("body"), b.get("scope_type") or "all", b.get("scope_target"),
-                                  source="manual")
+                                  source="manual", send_at=send_at)
         if err: return self._send(400, {"error": err})
+        if res.get("scheduled"):
+            return self._send(200, dict(ok=True, id=res["id"], count=res["count"], scheduled=True, send_at=res["send_at"]))
         return self._send(200, dict(ok=True, id=res["id"], count=res["count"]))
+
+    def _msg_templates(self, conn, aid, method, tid=None, b=None):
+        """站内信快捷模板：GET 列表 / POST 新增 / DELETE 删除，仅超级管理员。"""
+        if not self._need_super_admin(conn, aid): return
+        if method == "GET":
+            rows = conn.execute("SELECT * FROM message_template ORDER BY id DESC").fetchall()
+            return self._send(200, [dict(r) for r in rows])
+        if method == "POST":
+            name = (b.get("name") or "").strip()
+            if not name: return self._send(400, {"error": "模板名称不能为空"})
+            title = (b.get("title") or "").strip()
+            if not title: return self._send(400, {"error": "标题不能为空"})
+            now = _now()
+            cur = conn.execute("INSERT INTO message_template(name,msg_type,title,body,scope_type,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+                               (name, b.get("msg_type") or "push", title, b.get("body") or "", b.get("scope_type") or "user", now, now))
+            conn.commit()
+            return self._send(200, dict(ok=True, id=cur.lastrowid, name=name))
+        if method == "DELETE":
+            conn.execute("DELETE FROM message_template WHERE id=?", (tid,))
+            conn.commit()
+            return self._send(200, dict(ok=True))
+        return self._send(405, {"error": "method not allowed"})
 
     def _mark_read(self, conn, aid, mid):
         """当前用户将某条消息标记为已读。"""
@@ -2403,8 +2497,9 @@ class Handler(BaseHTTPRequestHandler):
             composite, passed, _ = assess_eval(dict(r), cfg)
             acc, period = r["account_id"], r["period"]
             title = "%s 月度考核成绩公布" % period
-            body = ("您 %s 的月度考核成绩已公布：综合得分 %.1f，判定「%s」。\n"
-                    "可前往「月度考核」查看各项指标明细。" % (period, composite, "达标" if passed else "未达标"))
+            body = ("您 %s 的月度考核成绩已公布：综合得分 %.1f。\n"
+                    "考核结果：%s（综合得分达标即通过，未达标即未通过）。\n"
+                    "可前往「月度考核」查看各项指标明细。" % (period, composite, "通过" if passed else "未通过"))
             now = _now()
             old = conn.execute("""SELECT m.id FROM message m JOIN message_recipient mr ON mr.message_id=m.id
                                   WHERE m.auto_rule='assess_result' AND mr.account_id=? AND m.title=?""",
@@ -2558,7 +2653,7 @@ class Handler(BaseHTTPRequestHandler):
             note = "CSV自动导入(%s)" % SCOPE_LABEL[scope]
             if not b.get("preview"):
                 # 查找或插入账号
-                conn.execute("INSERT OR IGNORE INTO account(account_id,display_name,level,status,join_date,note) VALUES(?,?, '中审','正常','','')", (acct, acct))
+                conn.execute("INSERT OR IGNORE INTO account(account_id,level,status,join_date,note) VALUES(?,'中审','正常','','')", (acct,))
                 if ex:
                     sets = ",".join("%s=?" % k for k in vals) + ",operator=?,updated_at=?,note=?"
                     conn.execute("UPDATE assess_record SET %s WHERE id=?" % sets,
@@ -2721,8 +2816,8 @@ class Handler(BaseHTTPRequestHandler):
             if not r: return self._send(404, {"error": "账号不存在"})
             now = _now()
             new_level = b.get("level", r["level"])
-            conn.execute("UPDATE account SET display_name=?,level=?,status=?,join_date=?,note=? WHERE id=?",
-                         (b.get("display_name", r["display_name"]), new_level, b.get("status", r["status"]), b.get("join_date", r["join_date"]), b.get("note", r["note"]), aid))
+            conn.execute("UPDATE account SET level=?,status=?,join_date=?,note=? WHERE id=?",
+                         (new_level, b.get("status", r["status"]), b.get("join_date", r["join_date"]), b.get("note", r["note"]), aid))
             # 账号身份等级变更后，同步到其所有有效权限记录
             if "level" in b and b["level"] != r["level"]:
                 conn.execute("UPDATE permission SET level=? WHERE account_id=? AND recycled=0", (new_level, r["account_id"]))
@@ -2790,6 +2885,10 @@ class Handler(BaseHTTPRequestHandler):
             aid = self._require_login(conn)
             if aid is None:
                 return
+            # 站内信快捷模板：删除
+            m_tpl = re.match(r"^/api/message-templates/(\d+)$", parsed.path)
+            if m_tpl:
+                return self._msg_templates(conn, aid, "DELETE", tid=int(m_tpl.group(1)))
             # 升级申请评估：撤回自己的评估（仅在待转正评估阶段）
             if len(parts) == 4 and parts[0] == "api" and parts[1] == "upgrade-applies" and parts[2].isdigit() and parts[3] == "evals":
                 return self._del_upgrade_eval(conn, aid, int(parts[2]))
@@ -3100,8 +3199,8 @@ class Handler(BaseHTTPRequestHandler):
             # 初始密码为默认规则 账号@2026（登录后可自行修改）。
             created_account = False
             if not conn.execute("SELECT 1 FROM account WHERE account_id=?", (apply_id,)).fetchone():
-                conn.execute("INSERT INTO account(account_id,display_name,level,status,join_date,note) VALUES(?,?,?,?,?,?)",
-                             (apply_id, apply_id, "待转正", "正常", now[:10], "初审报名自动建号（待转正）"))
+                conn.execute("INSERT INTO account(account_id,level,status,join_date,note) VALUES(?,?,?,?,?)",
+                             (apply_id, "待转正", "正常", now[:10], "初审报名自动建号（待转正）"))
                 created_account = True
             conn.execute("INSERT INTO change_log(permission_id,action,account_id,operator,change_time,detail) VALUES(?,?,?,?,?,?)",
                          (0, "申请登记新增", apply_id, aid or "未署名", now,
@@ -3185,7 +3284,7 @@ class Handler(BaseHTTPRequestHandler):
                     if apply_id := (r["apply_id"] or "").strip():
                         cat = (r["category"] or "").strip()
                         lvl = "初审"
-                        conn.execute("INSERT OR IGNORE INTO account(account_id,display_name,level,status,join_date,note) VALUES(?,?,?,?,?,?)", (apply_id, apply_id, lvl, '正常', '', '新评审申请转正'))
+                        conn.execute("INSERT OR IGNORE INTO account(account_id,level,status,join_date,note) VALUES(?,?,?,?,?)", (apply_id, lvl, '正常', '', '新评审申请转正'))
                         # 仅当账号当前为待转正（报名自动建号）时提升为初审；已有等级保持不变
                         conn.execute("""UPDATE account SET
                             level=CASE WHEN COALESCE(level,'') IN ('','待转正') THEN ? ELSE level END,
@@ -3264,7 +3363,7 @@ class Handler(BaseHTTPRequestHandler):
                     has_perm = conn.execute("SELECT 1 FROM permission WHERE account_id=? AND recycled=0 AND status IN ('正常','考核期','见习','实习')", (apply_id,)).fetchone()
                     if has_perm:
                         return self._send(409, {"error": "分类扩充月度限额：同一自然月仅可申请 1 个分类（%s 已占用）" % mon})
-                since = (datetime.datetime.now() - datetime.timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+                since = (_now_dt() - datetime.timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
                 recent = conn.execute("SELECT 1 FROM %s WHERE apply_id=? AND category=? AND apply_time>=?" % tbl, (apply_id, cat, since)).fetchone()
                 if recent:
                     return self._send(409, {"error": "该分类扩充申请 1 个月内已提交，重报须间隔 1 个月（制度 3.7.6）"})
@@ -3542,7 +3641,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, {"error": "仅支持图片文件（png/jpg/jpeg/gif/webp/bmp）"})
             if len(data) > 10 * 1024 * 1024:
                 return self._send(400, {"error": "文件大小超过 10MB 限制"})
-            subdir = datetime.datetime.now().strftime("%Y-%m")
+            subdir = _now_dt().strftime("%Y-%m")
             save_dir = os.path.join(SCREENSHOT_DIR, subdir)
             os.makedirs(save_dir, exist_ok=True)
             unique = secrets.token_hex(8)
@@ -3606,7 +3705,7 @@ class Handler(BaseHTTPRequestHandler):
                          (dup["id"], "权限激活", account_id, operator, now, "分类扩充通过后激活授权：%s / %s / %s" % (account_id, category, level)))
             return
         # 中审新取得分类权限先进入见习期（制度 5.6：见习 1 个月，期满无严重违规转正）
-        prob_until = (datetime.datetime.now() + datetime.timedelta(days=PROBATION_DAYS)).strftime("%Y-%m-%d")
+        prob_until = (_now_dt() + datetime.timedelta(days=PROBATION_DAYS)).strftime("%Y-%m-%d")
         cur = conn.execute("""INSERT INTO permission(account_id,category,level,status,effect_date,expire_date,source,system_version,operator,created_at,updated_at,probation_until)
                              VALUES(?,?,?,'见习',?,'',?,?,?,?,?,?)""",
                           (account_id, category, level, now[:10], "回环授权", SYSTEM_VERSION, operator, now, now, prob_until))
@@ -3734,7 +3833,7 @@ class Handler(BaseHTTPRequestHandler):
             if pr:
                 try:
                     d0 = datetime.datetime.strptime(pr, "%Y-%m-%d")
-                    if (datetime.datetime.now() - d0).days < 30:
+                    if (_now_dt() - d0).days < 30:
                         return self._send(400, {"error": "初审复权（%s）未满 1 个月，暂不可申请中审复权（制度 6.4）" % pr})
                 except Exception:
                     pass
@@ -3794,7 +3893,7 @@ class Handler(BaseHTTPRequestHandler):
         if new_status == "已失败":
             ext += 1
             if ext >= 2:
-                block_until = (datetime.datetime.now() + datetime.timedelta(days=182)).strftime("%Y-%m-%d")
+                block_until = (_now_dt() + datetime.timedelta(days=182)).strftime("%Y-%m-%d")
             result_time = now
         conn.execute(
             """UPDATE reinstate_apply SET account_id=?,category=?,target_level=?,status=?,official_versions=?,
@@ -4018,7 +4117,7 @@ class Handler(BaseHTTPRequestHandler):
                         eff = datetime.datetime.strptime(first_j["d"][:10], "%Y-%m-%d")
                     except Exception:
                         eff = None
-                    if eff and (datetime.datetime.now() - eff).days < 30:
+                    if eff and (_now_dt() - eff).days < 30:
                         return self._send(400, {"error": "初审授权未满 1 个月，暂不可申请中审（制度 6.2）"})
                 elif to_lv == "高审":
                     ac = conn.execute("SELECT level FROM account WHERE account_id=?", (ua,)).fetchone()
@@ -4118,7 +4217,7 @@ class Handler(BaseHTTPRequestHandler):
     def _get_official_package(self, conn, pid):
         pkg = conn.execute("SELECT * FROM official_task_package WHERE id=?", (pid,)).fetchone()
         if not pkg: return None
-        mems = conn.execute("""SELECT m.*, a.display_name
+        mems = conn.execute("""SELECT m.*, a.account_id AS display_name
             FROM official_task_member m LEFT JOIN account a ON m.account_id=a.account_id
             WHERE m.package_id=? ORDER BY m.id""", (pid,)).fetchall()
         d = dict(pkg)
@@ -4452,7 +4551,7 @@ class Handler(BaseHTTPRequestHandler):
         if recent and recent["created_at"]:
             try:
                 last = datetime.datetime.strptime(recent["created_at"][:19], "%Y-%m-%d %H:%M:%S")
-                diff = datetime.datetime.now() - last
+                diff = _now_dt() - last
                 if diff.total_seconds() < 7 * 86400:
                     remain_sec = 7 * 86400 - diff.total_seconds()
                     remain_days = int(remain_sec // 86400) + (1 if remain_sec % 86400 else 0)
@@ -4500,7 +4599,6 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(400, {"error": "账号为必填"})
         if conn.execute("SELECT 1 FROM account WHERE account_id=?", (account_id,)).fetchone():
             return self._send(409, {"error": "账号已存在：%s" % account_id})
-        display_name = (b.get("display_name") or "").strip() or account_id
         pw = (b.get("password") or "").strip()
         is_official = 1 if b.get("is_official") else 0
         is_admin = bool(b.get("is_admin"))
@@ -4510,9 +4608,9 @@ class Handler(BaseHTTPRequestHandler):
         if level not in ACCOUNT_LEVELS:
             level = "中审"
         now = _now()
-        conn.execute("""INSERT INTO account(account_id,display_name,password,level,status,is_test,is_official,join_date)
-                       VALUES(?,?,?,?, '正常',0,?,?)""",
-                     (account_id, display_name, default_pw(account_id) if not pw else hash_pw(pw), level, is_official, now))
+        conn.execute("""INSERT INTO account(account_id,password,level,status,is_test,is_official,join_date)
+                       VALUES(?,?,?, '正常',0,?,?)""",
+                     (account_id, default_pw(account_id) if not pw else hash_pw(pw), level, is_official, now))
         if is_admin:
             conn.execute("""INSERT INTO account_capability(account_id,capability,granted,operator,reason,created_at,updated_at)
                            VALUES(?, 'admin_grant',1,?,?,?,?)""",
@@ -4708,7 +4806,7 @@ class Handler(BaseHTTPRequestHandler):
                     "AND penalty_due IS NOT NULL AND penalty_due!='' ORDER BY penalty_due DESC LIMIT 1", (qq,)).fetchone()
                 if pen and pen["penalty_due"] and pen["penalty_due"] >= _now()[:10]:
                     return (True, "账号处于「%s」处罚期内（至 %s），不得报名（制度 4.4）" % (st, pen["penalty_due"]))
-        cutoff = (datetime.datetime.now() - datetime.timedelta(days=180)).strftime("%Y-%m-%d")
+        cutoff = (_now_dt() - datetime.timedelta(days=180)).strftime("%Y-%m-%d")
         row = conn.execute(
             "SELECT penalty,level FROM violation_record WHERE account_id=? AND COALESCE(status,'生效')!='已撤销' AND COALESCE(created_at,penalty_time)>=? "
             "AND (penalty IN ('取消权限','永久封禁') OR (level IN ('严重违规','重大违规') AND penalty IN ('取消权限','永久封禁','停审','降级'))) "
@@ -4898,7 +4996,7 @@ class Handler(BaseHTTPRequestHandler):
     # ---- 3.8 分类休眠检测（细化口径：有逐分类评审量明细时按「近 N 月该分类无评审量」判定；否则回退账号级考核记录） ----
     def _dormant_list(self, conn):
         from datetime import datetime as _dt, timedelta as _td
-        now = _dt.now()
+        now = _now_dt()
         d = now.replace(day=1)
         yms = []
         for _ in range(max(1, DORMANT_MONTHS)):
@@ -4941,7 +5039,7 @@ class Handler(BaseHTTPRequestHandler):
     # ---- 5.6 实习状态系统化 ----
     def _internship_list(self, conn):
         from datetime import datetime as _dt
-        today = _dt.now().strftime("%Y-%m-%d")
+        today = _now_dt().strftime("%Y-%m-%d")
         rows = conn.execute("SELECT id,account_id,category,level,status,expire_date,internship_start FROM permission WHERE recycled=0 AND status='实习'").fetchall()
         out = []
         for p in rows:
@@ -4963,7 +5061,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(400, {"error": "非法状态：%s" % st})
         if st == "实习":
             from datetime import datetime as _dt, timedelta as _td
-            expire = (_dt.now() + _td(days=30)).strftime("%Y-%m-%d")
+            expire = (_now_dt() + _td(days=30)).strftime("%Y-%m-%d")
             conn.execute("UPDATE permission SET status='实习', internship_start=?, expire_date=?, updated_at=? WHERE id=?", (now[:10], expire, now, pid))
             detail = "置实习，实习期至 %s（制度5.6）" % expire
         else:
@@ -4982,7 +5080,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(404, {"error": "权限记录不存在"})
         if r["status"] != "见习":
             return self._send(400, {"error": "仅见习状态可转正"})
-        now = datetime.datetime.now()
+        now = _now_dt()
         until = r["probation_until"] or ""
         if until and until > now.strftime("%Y-%m-%d"):
             return self._send(400, {"error": "见习期未届满（%s 届满）" % until})
@@ -5029,15 +5127,28 @@ def migrate():
             if col not in acct_cols:
                 conn.execute("ALTER TABLE account ADD COLUMN %s %s" % (col, typ))
                 print("数据迁移：account 表新增列 %s" % col)
+        # 站内信：定时发送支持（send_at 计划发送时间 / scheduled 待投递标记）
+        msg_cols = {r[1] for r in conn.execute("PRAGMA table_info(message)")}
+        for col, typ in [("send_at", "TEXT DEFAULT ''"), ("scheduled", "INTEGER DEFAULT 0")]:
+            if col not in msg_cols:
+                conn.execute("ALTER TABLE message ADD COLUMN %s %s" % (col, typ))
+                print("数据迁移：message 表新增列 %s" % col)
         # 自动识别并标记测试账号（名字/ID 包含测试特征）
         test_patterns = ["测试", "ceshi", "test", "123456789", "12345678", "ceshi2", "ceshi3", "ceshi4", "ceshi5"]
-        pat_sql = " OR ".join(["account_id LIKE ? OR display_name LIKE ?" for _ in test_patterns])
+        pat_sql = " OR ".join(["account_id LIKE ?" for _ in test_patterns])
         params = []
         for p in test_patterns:
-            params.extend(["%%%s%%" % p] * 2)
+            params.extend(["%%%s%%" % p])
         n_test = conn.execute("UPDATE account SET is_test=1 WHERE is_test=0 AND (%s)" % pat_sql, params).rowcount
         if n_test:
             print("数据迁移：自动标记 %d 个测试账号" % n_test)
+        # 数据迁移：移除冗余的 display_name 列（账号昵称与 account_id 完全一致，已在全系统去耦合）
+        if "display_name" in {x[1] for x in conn.execute("PRAGMA table_info(account)")}:
+            try:
+                conn.execute("ALTER TABLE account DROP COLUMN display_name")
+                print("数据迁移：account 表移除冗余列 display_name")
+            except sqlite3.OperationalError:
+                pass
         # 历史报名自动建号账号：尚未取得正式权限的，等级由「初审」回退为「待转正」，待评估通过后再转正
         n_pending = conn.execute("""
             UPDATE account SET level='待转正', note=CASE
@@ -5075,8 +5186,8 @@ def migrate():
         for row in conn.execute("SELECT DISTINCT apply_id FROM registration WHERE apply_id IS NOT NULL AND apply_id!=''").fetchall():
             aid_ = row["apply_id"]
             if not conn.execute("SELECT 1 FROM account WHERE account_id=?", (aid_,)).fetchone():
-                conn.execute("INSERT INTO account(account_id,display_name,level,status,join_date,note) VALUES(?,?,?,?,?,?)",
-                             (aid_, aid_, "待转正", "正常", now_[:10], "报名账号补建（待转正）"))
+                conn.execute("INSERT INTO account(account_id,level,status,join_date,note) VALUES(?,?,?,?,?)",
+                             (aid_, "待转正", "正常", now_[:10], "报名账号补建（待转正）"))
                 print("数据迁移：补建报名账号 %s（待转正，初始密码 %s@2026）" % (aid_, aid_))
         # 建立/补全高频查询索引（幂等；随数据增长避免列表/台账/日志查询变慢）
         _idx_specs = [
@@ -5155,8 +5266,8 @@ def migrate_team_config():
         seeded = 0
         def _ensure_acct(aid):
             if not conn.execute("SELECT 1 FROM account WHERE account_id=?", (aid,)).fetchone():
-                conn.execute("INSERT INTO account(account_id,display_name,level,status,join_date,note) VALUES(?,?,?,?,?,?)",
-                             (aid, aid, "中审", "正常", now[:10], "团队配置自动建号"))
+                conn.execute("INSERT INTO account(account_id,level,status,join_date,note) VALUES(?,?,?,?,?)",
+                             (aid, "中审", "正常", now[:10], "团队配置自动建号"))
         for domain, cfg in TEAM_SEED.items():
             for role, aid in (("团队负责人", cfg["负责人"]), ("质量组长", cfg["质量组长"])):
                 _ensure_acct(aid)
@@ -5309,6 +5420,8 @@ def main():
     ThreadingHTTPServer.request_queue_size = 128
     server = ThreadingHTTPServer((host, port), Handler)
     net_desc = "所有网卡(0.0.0.0)" if host == "0.0.0.0" else host
+    # 后台调度：每 30s 扫描定时站内信并到点投递（守护线程，进程退出即终止）
+    threading.Thread(target=_message_scheduler_loop, daemon=True).start()
     print("权限统计与考核系统已启动： http://%s:%d（多线程模式，监听%s，便于部署到服务器后对外访问）" % (host, port, net_desc))
     try:
         server.serve_forever()

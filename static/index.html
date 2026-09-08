@@ -138,7 +138,7 @@
       <select id="f-domain" data-label="领域"></select><select id="f-group" data-label="二级组"></select><select id="f-category" data-label="分类"></select>
       <select id="f-level" data-label="等级"><option value="">等级</option></select>
       <select id="f-status" data-label="状态"><option value="">状态</option></select>
-      <input id="f-account" placeholder="账号 / 昵称">
+      <input id="f-account" placeholder="账号">
       <label class="chk"><input type="checkbox" id="f-active">仅有效</label>
       <button class="btn" id="btn-query">查询</button>
       <button class="btn ghost" id="btn-reset">重置</button>
@@ -151,13 +151,13 @@
     <div class="card" id="ledger-matrix">
       <div class="lvlegend" style="margin-bottom:8px">账号等级：<span class="pill lv1">初审</span><span class="pill lv2">中审</span><span class="pill lv3">高审</span></div>
       <div class="lvlegend" style="margin-bottom:10px">账号状态：<span class="pill g">正常</span><span class="pill y">考核期 / 见习 / 实习 / 待复权</span><span class="pill r">停审 / 降级 / 已回收 / 退出 / 永封</span></div>
-      <div class="matrix-head"><span>账号 / 昵称</span><span>账号等级</span><span>状态</span><span>权限分布（按领域聚合）</span><span>操作</span></div>
+      <div class="matrix-head"><span>账号</span><span>账号等级</span><span>状态</span><span>权限分布（按领域聚合）</span><span>操作</span></div>
       <div id="matrix-body"></div>
       <div class="pager" id="matrix-pager"></div>
     </div>
     <div class="card" id="ledger-detail" style="display:none">
       <table id="ledger-table"><thead><tr>
-        <th>账号 / 昵称</th><th>领域</th><th>二级组</th><th>分类</th>
+        <th>账号</th><th>领域</th><th>二级组</th><th>分类</th>
         <th>状态</th><th>生效</th><th>失效</th><th>来源</th><th>操作人</th><th>操作</th>
       </tr></thead><tbody id="ledger-body"></tbody></table>
       <div class="pager" id="ledger-pager"></div>
@@ -187,7 +187,7 @@
       <div class="kpis" id="edit-kpis" style="grid-template-columns:repeat(3,1fr);margin-bottom:14px"></div>
       <div class="card">
         <table id="edit-table"><thead><tr>
-          <th>账号 / 昵称</th><th>周期</th><th>特色达标数</th><th>本项达标</th><th>操作</th>
+          <th>账号</th><th>周期</th><th>特色达标数</th><th>本项达标</th><th>操作</th>
         </tr></thead><tbody id="edit-body"></tbody></table>
       </div>
     </div>
@@ -204,7 +204,7 @@
       <div class="kpis" id="review-kpis" style="grid-template-columns:repeat(3,1fr);margin-bottom:14px"></div>
       <div class="card">
         <table id="review-table"><thead><tr>
-          <th>账号 / 昵称</th><th>周期</th><th>版本判定准确率%</th><th>主分类/副分类</th><th>主分类<br>≥30</th><th>副分类<br>要求</th><th>实际/<br>代换</th><th>达标</th><th>操作</th>
+          <th>账号</th><th>周期</th><th>版本判定准确率%</th><th>主分类/副分类</th><th>主分类<br>≥30</th><th>副分类<br>要求</th><th>实际/<br>代换</th><th>达标</th><th>操作</th>
         </tr></thead><tbody id="review-body"></tbody></table>
       </div>
     </div>
@@ -221,7 +221,7 @@
       <div class="kpis" id="official-kpis" style="grid-template-columns:repeat(3,1fr);margin-bottom:14px"></div>
       <div class="card">
         <table id="official-table"><thead><tr>
-          <th>账号 / 昵称</th><th>周期</th><th>官方专项错误率%</th><th>官方版本数</th>          <th>本项达标</th><th>操作</th>
+          <th>账号</th><th>周期</th><th>官方专项错误率%</th><th>官方版本数</th>          <th>本项达标</th><th>操作</th>
         </tr></thead><tbody id="official-body"></tbody></table>
       </div>
     </div>
@@ -247,13 +247,13 @@
           <button class="btn" id="btn-exempt-add" data-auth="write">+ 登记请假 / 报备</button>
         </div>
         <table id="exempt-table"><thead><tr>
-          <th>账号 / 昵称</th><th>周期</th><th>类型</th><th>方式</th><th>天数</th><th>减免比例</th><th>涉及分类</th><th>原因</th><th>操作</th>
+          <th>账号</th><th>周期</th><th>类型</th><th>方式</th><th>天数</th><th>减免比例</th><th>涉及分类</th><th>原因</th><th>操作</th>
         </tr></thead><tbody id="exempt-body"></tbody></table>
       </div>
 
       <div class="card">
         <table id="result-table"><thead><tr>
-          <th>排名</th><th>账号 / 昵称</th><th>综合分</th><th>版本判定%</th><th>任务达标%</th>
+          <th>排名</th><th>账号</th><th>综合分</th><th>版本判定%</th><th>任务达标%</th>
           <th>官方错误%</th><th>反馈违规</th><th>否决</th><th>免减</th><th>判定</th>
         </tr></thead><tbody id="result-body"></tbody></table>
       </div>
@@ -326,7 +326,7 @@
         <div class="toolbar">
           <div class="seg acct-filter">
             <button class="segbtn active" data-acct-filter="all">全部</button>
-            <button class="segbtn" data-acct-filter="real">实际账号</button>
+            <button class="segbtn" data-acct-filter="real">用户账号</button>
             <button class="segbtn" data-acct-filter="official">官方账号</button>
             <button class="segbtn" data-acct-filter="test">测试账号</button>
           </div>
@@ -337,7 +337,7 @@
           <label>账号类型
             <select id="am-filter-official"><option value="">全部</option><option value="1">官方账号</option><option value="0">普通账号</option></select>
           </label>
-          <input id="am-filter-kw" placeholder="账号 / 昵称" style="width:150px">
+          <input id="am-filter-kw" placeholder="账号" style="width:150px">
           <button class="btn" id="btn-am-filter">查询</button>
           <button class="btn ghost" id="btn-am-reset">重置</button>
           <span class="spacer"></span>
@@ -1039,6 +1039,13 @@
   <h3>发布站内信</h3>
   <p class="hint"><b>系统消息</b>用于全局配置类通知（面向全体）；<b>单独推送</b>用于定向通知特定账号或群体。发布后立即下发，并为范围内的每个接收人写入未读状态。</p>
   <div class="form">
+    <label class="full">快捷模板
+      <span class="tpl-row">
+        <select id="ms-template"><option value="">— 选择模板 —</option></select>
+        <button class="btn ghost" id="ms-save-tpl" type="button">保存为模板</button>
+        <button class="btn ghost" id="ms-del-tpl" type="button">删除所选</button>
+      </span>
+    </label>
     <label>消息类型<select id="ms-type">
       <option value="system">系统消息（全局配置类）</option>
       <option value="push">单独推送（定向通知）</option>
@@ -1057,6 +1064,7 @@
     </div>
     <label class="full">标题*<input id="ms-title" placeholder="请输入消息标题"></label>
     <label class="full">正文<textarea id="ms-body" placeholder="请输入消息正文"></textarea></label>
+    <label class="full">定时发送（可选）<input id="ms-schedule" type="datetime-local"> <span class="muted">留空则立即发送；设定未来时间将由系统到点自动投递</span></label>
   </div>
   <div class="modal-actions"><button class="btn ghost" id="ms-cancel">取消</button><button class="btn primary" id="ms-save" data-auth="write">发布</button></div>
   <div id="ms-result" class="result"></div>
@@ -1257,7 +1265,6 @@
   <p class="hint">仅超级管理员可创建账号。官方账号不归属评审，默认管理员级别（具备管理员权限）。</p>
   <div class="form">
     <label>账号（百科 ID）<input id="na-account" type="text" placeholder="必填，唯一" autocomplete="off"></label>
-    <label>昵称（可选）<input id="na-name" type="text" placeholder="留空则等同账号" autocomplete="off"></label>
     <label>初始密码（可选）<input id="na-pw" type="text" placeholder="留空=默认 账号@2026" autocomplete="off"></label>
     <label>等级<select id="na-level"><option value="初审">初审</option><option value="中审" selected>中审</option><option value="高审">高审</option></select></label>
     <label class="chk"><input type="checkbox" id="na-official"> 官方账号（不归属评审）</label>

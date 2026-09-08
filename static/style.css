@@ -494,3 +494,5 @@ tr.ib-unread td:first-child{box-shadow:inset 3px 0 0 var(--warn,#e08a00)}
 .acct-card .ac-actions{display:flex;gap:8px 14px;flex-wrap:wrap;align-items:center;border-top:1px dashed var(--line);padding-top:8px}
 .acct-card .ac-roles{display:inline-flex;gap:2px;flex-wrap:wrap;padding-right:12px;margin-right:2px;border-right:1px solid var(--line)}
 .acct-card .ac-actions .muted{margin-left:auto}
+.tpl-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.tpl-row select{flex:1;min-width:160px}

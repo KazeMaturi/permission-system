@@ -229,9 +229,9 @@ async function loadMatrix(){
       const tags=dom.items.map(it=>`<span class="tag" title="${it.group_name?it.group_name+' · ':''}${it.category} · ${it.status}">${it.category}</span>`).join(" ");
       return `<div class="matrix-domain"><span class="domain-name">${dom.domain}</span><div class="domain-tags">${tags}</div></div>`;
     }).join("");
-    const name=r.display_name&&r.display_name!==r.account_id?`${r.account_id}<br><span class="muted">${r.display_name}</span>`:r.account_id;
+    const name=r.account_id;
     return `<div class="matrix-row" data-aid="${r.account_id}">
-      <div class="matrix-cell name" data-label="账号 / 昵称">${name}</div>
+      <div class="matrix-cell name" data-label="账号">${name}</div>
       <div class="matrix-cell" data-label="账号等级"><span class="pill ${LEVEL_CLASS[r.acct_level]||'n'}">${r.acct_level}</span></div>
       <div class="matrix-cell" data-label="状态"><span class="pill ${STATUS_CLASS[r.acct_status]||'n'}">${r.acct_status}</span></div>
       <div class="matrix-cell perms" data-label="权限分布">${domains}</div>
@@ -1398,7 +1398,6 @@ async function createAccount(){
   if(!account_id){await UI.alert("请填写账号");return;}
   const body={
     account_id,
-    display_name:val("na-name").trim(),
     password:val("na-pw").trim(),
     level:val("na-level"),
     is_official:document.getElementById("na-official").checked,
@@ -1539,12 +1538,12 @@ function renderAcctCard(r){
   const sa = ME && ME.is_super_admin;
   const badges=[];
   const lc = r.lifecycle || r.status || '正常';
-  badges.push(`<span class="pill ${LEVEL_CLASS[r.level]||'n'}">${r.level||''}</span>`);
+  if(!isOff) badges.push(`<span class="pill ${LEVEL_CLASS[r.level]||'n'}">${r.level||''}</span>`);
   badges.push(`<span class="pill ${STATUS_CLASS[lc]||'n'}">${lc}</span>`);
   if(isOff) badges.push(`<span class="pill" style="background:#1d4ed8;color:#fff">官方</span>`);
   if(isAdm) badges.push(`<span class="pill g">管理员</span>`);
   if(isSA) badges.push(`<span class="pill" style="background:#7c2d12;color:#fff">超级管理员</span>`);
-  badges.push(`<span class="pill ${isTest?'y':'b'}">${isTest?'测试':'实际'}</span>`);
+  if(!isOff) badges.push(`<span class="pill ${isTest?'y':'b'}">${isTest?'测试':'用户'}</span>`);
   const heldRoles=(r.roles||[]).filter(x=>x.status==='在任' && AM_ROLES.includes(x.role)).map(x=>x.role+(x.scope?'<span class="muted">·'+escMsg(x.scope)+'</span>':''));
   let roleActs="";
   if(sa){
@@ -1556,10 +1555,10 @@ function renderAcctCard(r){
   const ops=[];
   if(ME) ops.push(`<button class="linkbtn" data-aid="${r.id}">编辑</button>`);
   if(sa) ops.push(`<button class="linkbtn del" data-acct-del="${r.id}">删除</button>`);
-  if(sa && !isOff) ops.push(`<button class="linkbtn" data-acct-test="${r.id}" data-current="${isTest?1:0}">${isTest?'标记为实际':'标记为测试'}</button>`);
+  if(sa && !isOff) ops.push(`<button class="linkbtn" data-acct-test="${r.id}" data-current="${isTest?1:0}">${isTest?'转为用户账号':'转为测试账号'}</button>`);
   return `<div class="acct-card">
     <div class="ac-top">
-      <div class="ac-id"><b>${escMsg(r.account_id)}</b>${r.display_name&&r.display_name!==r.account_id?`<span class="muted">${escMsg(r.display_name)}</span>`:''}</div>
+      <div class="ac-id"><b>${escMsg(r.account_id)}</b>${isOff?` <span class="muted">· 官方</span>`:''}</div>
       <div class="ac-badges">${badges.join(' ')}</div>
     </div>
     <div class="ac-meta">
@@ -1609,7 +1608,7 @@ function renderAcctList(){
     const id=b.dataset.acctTest;
     const row=ALL_ACCTS.find(x=>String(x.id)===String(id));
     if(!row)return;
-    const next=!parseInt(b.dataset.current||"0",10); const label=next?'测试账号':'实际账号';
+    const next=!parseInt(b.dataset.current||"0",10); const label=next?'测试账号':'用户账号';
     if(!await UI.confirm(`确认将「${row.account_id}」标记为 ${label}？`))return;
     const res=await fetch("/api/accounts/"+id+"/test",{method:"PUT",headers:j(),body:JSON.stringify({is_test:next?1:0})}).then(r=>r.json());
     if(res.error){await UI.alert("操作失败："+res.error);return;}
@@ -1980,10 +1979,12 @@ function filterMsgGroups(){
 async function openMsgSend(){
   if(!requireAuth()) return;
   if(!(ME&&ME.is_super_admin)){await UI.alert("无权限：仅超级管理员可发布站内信"); return;}
-  ["ms-title","ms-body","ms-users"].forEach(id=>document.getElementById(id).value="");
+  ["ms-title","ms-body","ms-users","ms-schedule"].forEach(id=>{const e=document.getElementById(id); if(e) e.value="";});
+  const tpl=document.getElementById("ms-template"); if(tpl) tpl.value="";
   document.getElementById("ms-result").textContent="";
   document.getElementById("ms-scope").value="all";
   document.getElementById("ms-group-search").value="";
+  loadMsgTemplates();
   const d=await API("/api/messages/groups");
   const groups=d.rows||[];
   document.getElementById("ms-groups").innerHTML=groups.length?groups.map(g=>
@@ -2011,12 +2012,69 @@ async function saveMsg(){
     if(!sel.length){await UI.alert("请至少选择一个用户组 / 群体"); return;}
     target=sel.join(",");
   }
-  const res=await fetch("/api/messages",{method:"POST",headers:j(),
-    body:JSON.stringify({msg_type:val("ms-type"),title:title,body:val("ms-body"),scope_type:scope,scope_target:target})}).then(r=>r.json());
-  if(res.error){await UI.alert("发布失败："+res.error); return;}
-  document.getElementById("ms-result").textContent="发布成功：消息 #"+res.id+"，共下发 "+res.count+" 人。";
-  showToast("发布成功，已下发 "+res.count+" 人","ok");
-  loadMsgManage();
+  // 定时发送：datetime-local -> YYYY-MM-DD HH:MM:SS（按当前时区解释，系统统一视为北京时间）
+  let send_at="";
+  const sch=val("ms-schedule")||"";
+  if(sch){
+    const dt=new Date(sch);
+    if(isNaN(dt.getTime())){await UI.alert("定时发送时间无效"); return;}
+    const p=n=>String(n).padStart(2,"0");
+    send_at=`${dt.getFullYear()}-${p(dt.getMonth()+1)}-${p(dt.getDate())} ${p(dt.getHours())}:${p(dt.getMinutes())}:${p(dt.getSeconds())}`;
+  }
+  const btn=document.getElementById("ms-save");
+  if(_msgSending) return;
+  _msgSending=true; if(btn) btn.disabled=true;
+  try{
+    const res=await fetch("/api/messages",{method:"POST",headers:j(),
+      body:JSON.stringify({msg_type:val("ms-type"),title:title,body:val("ms-body"),scope_type:scope,scope_target:target,send_at})}).then(r=>r.json());
+    if(res.error){await UI.alert("发布失败："+res.error); return;}
+    if(res.scheduled){
+      showToast("已加入定时发送队列，将于 "+res.send_at+" 自动投递","ok");
+    }else{
+      showToast("发布成功，已下发 "+res.count+" 人","ok");
+    }
+    // 发信成功后关闭弹窗并重置，避免连按重复发布
+    closeMsgSend();
+    loadMsgManage();
+  } finally {
+    _msgSending=false; if(btn) btn.disabled=false;
+  }
+}
+let _msgSending=false;
+function closeMsgSend(){
+  const m=document.getElementById("modal-msg-send"); if(m) m.classList.remove("show");
+  ["ms-title","ms-body","ms-users","ms-schedule"].forEach(id=>{const e=document.getElementById(id); if(e) e.value="";});
+  const r=document.getElementById("ms-result"); if(r) r.textContent="";
+}
+async function loadMsgTemplates(){
+  try{
+    const d=await API("/api/message-templates");
+    const sel=document.getElementById("ms-template"); if(!sel) return;
+    const cur=sel.value;
+    sel.innerHTML='<option value="">— 选择模板 —</option>'+d.map(t=>`<option value="${t.id}">${escMsg(t.name)}</option>`).join("");
+    sel.value=cur;
+  }catch(e){}
+}
+async function saveMsgTemplate(){
+  if(!(ME&&ME.is_super_admin)){await UI.alert("无权限：仅超级管理员可管理模板"); return;}
+  const name=await UI.prompt("模板名称","");
+  if(!name) return;
+  const title=(val("ms-title")||"").trim();
+  if(!title){await UI.alert("请先填写标题再保存模板"); return;}
+  const res=await fetch("/api/message-templates",{method:"POST",headers:j(),
+    body:JSON.stringify({name:name,msg_type:val("ms-type"),title:title,body:val("ms-body"),scope_type:val("ms-scope")})}).then(r=>r.json());
+  if(res.error){await UI.alert("保存失败："+res.error); return;}
+  showToast("已保存模板："+name,"ok");
+  loadMsgTemplates();
+}
+async function delMsgTemplate(){
+  if(!(ME&&ME.is_super_admin)){await UI.alert("无权限：仅超级管理员可管理模板"); return;}
+  const id=val("ms-template"); if(!id){await UI.alert("请先选择要删除的模板"); return;}
+  if(!(await UI.confirm("确认删除所选模板？"))) return;
+  const res=await fetch("/api/message-templates/"+id,{method:"DELETE",headers:j()}).then(r=>r.json());
+  if(res.error){await UI.alert("删除失败："+res.error); return;}
+  showToast("已删除模板","ok");
+  loadMsgTemplates();
 }
 function bindInbox(){
   document.querySelectorAll("#page-inbox .subtab").forEach(b=>b.onclick=()=>showInboxSub(b.dataset.ib));
@@ -2032,6 +2090,14 @@ function bindInbox(){
   document.getElementById("btn-mg-send").onclick=openMsgSend;
   document.getElementById("ms-cancel").onclick=()=>document.getElementById("modal-msg-send").classList.remove("show");
   document.getElementById("ms-save").onclick=saveMsg;
+  document.getElementById("ms-save-tpl").onclick=saveMsgTemplate;
+  document.getElementById("ms-del-tpl").onclick=delMsgTemplate;
+  document.getElementById("ms-template").onchange=async()=>{
+    const id=val("ms-template"); if(!id) return;
+    const d=await API("/api/message-templates");
+    const t=d.find(x=>String(x.id)===String(id));
+    if(t){ document.getElementById("ms-type").value=t.msg_type||"push"; document.getElementById("ms-title").value=t.title||""; document.getElementById("ms-body").value=t.body||""; refreshCustomSelect("ms-type"); }
+  };
   document.getElementById("ms-scope").onchange=syncMsgScope;
   document.getElementById("ms-group-search").oninput=filterMsgGroups;
   document.getElementById("mv-close").onclick=()=>document.getElementById("modal-msg-view").classList.remove("show");
@@ -2390,7 +2456,7 @@ function bind(){
   // 新建账号（仅超级管理员）
   const naBtn=document.getElementById("btn-new-account");
   if(naBtn)naBtn.onclick=()=>{
-    ["na-account","na-name","na-pw"].forEach(id=>document.getElementById(id).value="");
+    ["na-account","na-pw"].forEach(id=>document.getElementById(id).value="");
     document.getElementById("na-level").value="中审";
     document.getElementById("na-official").checked=false;
     document.getElementById("na-admin").checked=true;

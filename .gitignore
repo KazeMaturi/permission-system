@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.pyc
+server.log
+
+# 本地/临时数据
+data/tmp/
+data/tmpp/
+data/tmp*
+data/*.bak*
+data/del_debug.log
+*.db.bak*
+permissions.db
+permission.db
+permission.db.bak*
+permission_backup_*
+sheet_raw.txt
+
+# 部署/运行期产物（非源码，不入库）
+.deploy.pid
+.deploy.url
+deploy_runtime.log
+server*.log
+*.log
+
+# 开发/验证脚本与报告（非运行必需）
+verify_phase*
+verify_fixes*
+smoke_phase*
+e2e_reg*
+build_import*
+do_import*
+import_leaders*
+recon_accounts*
+功能与制度符合性梳理报告*
+制度符合性核对与自检报告*
+新评审报名改造验收报告*
+
+# 部署包（不进仓库）
+*.deploy.zip
+
+# 本地临时验证脚本
+_test_*.py
+_test*.py

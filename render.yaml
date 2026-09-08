@@ -1,0 +1,18 @@
+# Render (Python PaaS) 部署描述文件 —— 非 VPS，属云端托管。
+# 部署步骤：把本目录推到 GitHub，在 Render 新建 "Blueprint" 并关联仓库即可。
+services:
+  - type: web
+    name: permission-system
+    runtime: python
+    plan: free                 # 免费套餐；如需数据库持久化可升级或挂 Persistent Disk
+    pythonVersion: "3.12"
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python3 app.py"
+    envVars:
+      - key: HOST
+        value: "0.0.0.0"       # 监听所有网卡，供 Render 反代访问
+      - key: PORT
+        sync: false            # Render 自动注入 PORT，无需手动设置
+    healthCheckPath: "/"
+    # 免费套餐文件系统为临时存储：permission.db 会在每次重启/部署后被重置。
+    # 测试期可接受（用初始种子数据）；若需持久化，请在 Render 控制台挂载 Disk 并指向 /opt/render/project/permission.db 所在目录。

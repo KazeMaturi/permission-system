@@ -1,0 +1,4 @@
+# 本项目仅使用 Python 标准库（http.server / sqlite3），无需第三方依赖即可运行。
+# 推荐 Python 3.12+。当前 ThreadingHTTPServer 已为多线程，配合 SQLite WAL 足以支撑对外测试规模。
+# 若后续并发量增大，可前置 nginx 反向代理并把本进程以 systemd/supervisor 守护；
+# 也可安装 waitress 等 WSGI 服务器（需将 Handler 改为 WSGI 应用，当前非必须）。

@@ -1354,18 +1354,12 @@ function bindStripActions(bodyId, sub){
 }
 
 // ---------- 管理员管理（仅超级管理员可操作；含评审角色绑定，原独立页签已并入） ----------
-let AM_META={scoped:{},domains:[],groups:[]}, AM_ROWS=[];
+let AM_META={scoped:{},domains:[],groups:[]}, AM_ROWS=[], AM_ROLES=[], ALL_ACCTS=[], ACCT_QUICK="all";
 function amScopeOptions(role){
   if(role==="特色小组长"){
     return AM_META.groups.map(g=>'<option value="'+escMsg(g.group_name)+'">'+escMsg(g.group_name)+"（"+escMsg(g.domain)+"）</option>").join("");
   }
   return AM_META.domains.map(d=>'<option value="'+escMsg(d)+'">'+escMsg(d)+"</option>").join("");
-}
-function updateAmScope(){
-  const role=val("am-role");const lab=document.getElementById("am-scope-label");
-  if(!lab)return;
-  if(AM_META.scoped[role]){lab.style.display="";document.getElementById("am-scope").innerHTML=amScopeOptions(role);refreshCustomSelect("am-scope");}
-  else lab.style.display="none";
 }
 let amPending=null; // {target, role}
 function openAmScope(target,role){
@@ -1381,85 +1375,13 @@ async function amGrant(target,role,scope){
   const res=await fetch("/api/admin/grant",{method:"POST",headers:j(),body:JSON.stringify({account_id:target,role:role,scope:scope||""})}).then(x=>x.json());
   if(res.error){await UI.alert("操作失败："+res.error);return;}
   showToast("已设置："+target+" / "+role+(scope?("·"+scope):""),"ok");
-  loadAdminMgmt();
+  loadAccts();
 }
 async function amRevoke(target,role){
   const res=await fetch("/api/admin/revoke",{method:"POST",headers:j(),body:JSON.stringify({account_id:target,role:role})}).then(x=>x.json());
   if(res.error){await UI.alert("操作失败："+res.error);return;}
   showToast("已取消："+target+" / "+role,"ok");
-  loadAdminMgmt();
-}
-async function loadAdminMgmt(){
-  const d=await API("/api/admin/accounts");
-  if(d.error){await UI.alert("加载失败："+d.error);return;}
-  AM_META={scoped:d.scoped_roles||{},domains:d.domains||[],groups:d.groups||[]};
-  const roles=d.admin_roles||[]; // 已按期望顺序返回
-  // 填充筛选下拉
-  const frole=document.getElementById("am-filter-role");
-  if(frole){frole.innerHTML='<option value="">全部角色</option><option value="_none_">无管理角色</option>'+roles.map(r=>'<option value="'+r+'">'+r+'</option>').join("");refreshCustomSelect("am-filter-role");}
-  document.getElementById("am-acct-list").innerHTML=(d.rows||[]).map(r=>'<option value="'+r.account_id+'"></option>').join("");
-  let rows=d.rows||[];
-  // 筛选
-  const kw=(val("am-filter-kw")||"").trim().toLowerCase();
-  const fRole=val("am-filter-role");
-  const fOff=val("am-filter-official");
-  if(kw) rows=rows.filter(r=>r.account_id.toLowerCase().includes(kw)||(r.display_name||"").toLowerCase().includes(kw));
-  if(fOff!=="") rows=rows.filter(r=>!!r.is_official==(fOff==="1"));
-  if(fRole){
-    rows=rows.filter(r=>{
-      const held=(r.roles||[]).filter(x=>x.status==='在任'&&roles.includes(x.role)).map(x=>x.role);
-      if(fRole==="_none_") return held.length===0;
-      return held.includes(fRole);
-    });
-  }
-  AM_ROWS=rows; // 缓存当前显示行，便于后续操作
-  document.getElementById("am-body").innerHTML=rows.length?rows.map(r=>{
-    const isAdm=!!r.is_admin, isSA=!!r.is_super_admin, isOff=!!r.is_official;
-    const myRoles=(r.roles||[]).filter(x=>x.status==='在任'&&(roles.includes(x.role))).map(x=>x.role+(x.scope?'<span class="muted">·'+escMsg(x.scope)+'</span>':''));
-    let acts="";
-    if(ME&&ME.is_super_admin){
-      roles.forEach(role=>{
-        const held=(r.roles||[]).some(x=>x.role===role&&x.status==='在任');
-        acts+=`<button class="linkbtn ${held?'del':''}" data-am-toggle="${r.account_id}" data-role="${role}" data-grant="${held?0:1}">${held?'取消':'设为'}${role}</button> `;
-      });
-    }
-    if(!acts) acts='<span class="muted">—</span>';
-    // 官方账号身份标签显示为「官方」
-    const levelCell=isOff?'<span class="pill" style="background:#1d4ed8;color:#fff">官方</span>':`<span class="pill ${LEVEL_CLASS[r.level]||'n'}">${r.level||""}</span>`;
-    return `<tr>
-      <td>${r.account_id}${r.display_name&&r.display_name!==r.account_id?'<br><span class="muted">'+r.display_name+'</span>':''}</td>
-      <td>${levelCell}</td>
-      <td><span class="pill ${STATUS_CLASS[r.status]||'n'}">${r.status||""}</span></td>
-      <td>${isAdm?'<span class="pill g">是</span>':'<span class="muted">否</span>'}</td>
-      <td>${isSA?'<span class="pill" style="background:#7c2d12;color:#fff">是</span>':'<span class="muted">否</span>'}</td>
-      <td>${isOff?'<span class="pill" style="background:#1d4ed8;color:#fff">是</span>':'<span class="muted">否</span>'}</td>
-      <td>${myRoles.length?myRoles.map(x=>'<span class="tag">'+x+'</span>').join(" "):'<span class="muted">—</span>'}</td>
-      <td>${acts}</td></tr>`;
-  }).join(""):'<tr><td colspan="8" class="empty">暂无账号</td></tr>';
-  document.querySelectorAll("#am-body [data-am-toggle]").forEach(b=>b.onclick=async()=>{
-    if(!requireAuth())return;
-    const target=b.dataset.amToggle, role=b.dataset.role, grant=b.dataset.grant==="1";
-    if(grant&&AM_META.scoped[role]){openAmScope(target,role);return;}
-    if(!await UI.confirm("确认"+(grant?"设为":"取消")+"「"+role+"」："+target+"？"))return;
-    if(grant)await amGrant(target,role,"");
-    else await amRevoke(target,role);
-  });
-  loadEvalRoleAssigns();
-}
-async function adminSet(grant){
-  if(!requireAuth())return;
-  const target=val("am-account").trim();
-  const role=val("am-role");
-  if(!target){await UI.alert("请填写目标账号");return;}
-  let scope="";
-  if(grant&&AM_META.scoped[role]){
-    scope=val("am-scope");
-    if(!scope){await UI.alert("「"+role+"」须选择"+(AM_META.scoped[role]||"管辖范围"));return;}
-  }
-  const res=await fetch(grant?"/api/admin/grant":"/api/admin/revoke",{method:"POST",headers:j(),body:JSON.stringify({account_id:target,role:role,scope:scope})}).then(x=>x.json());
-  if(res.error){await UI.alert("操作失败："+res.error);return;}
-  document.getElementById("am-tip").textContent=(grant?"已设为":"已取消")+"管理员："+target+" / "+role+(scope?("·"+scope):"");
-  loadAdminMgmt();
+  loadAccts();
 }
 async function createAccount(){
   if(!requireAuth())return;
@@ -1477,7 +1399,7 @@ async function createAccount(){
   if(res.error){await UI.alert("创建失败："+res.error);return;}
   document.getElementById("modal-new-account").classList.remove("show");
   await UI.alert("已创建账号："+account_id+(body.is_official?"（官方账号·管理员级别）":(body.is_admin?"（管理员级别）":"")));
-  loadAdminMgmt();
+  loadAccts();
 }
 
 async function loadAppeals(){const d=await API("/api/appeals");
@@ -1603,30 +1525,68 @@ async function loadPermSort(){
 }
 
 // ---------- 基础数据 ----------
-function renderAcctRow(r){
-  const isOff=!!r.is_official;
-  const usage = isOff?'<span class="pill" style="background:#1d4ed8;color:#fff">官方</span>':`<span class="pill ${r.is_test?'y':'g'}">${r.is_test?'测试':'实际'}</span>`;
-  const usageBtn = (ME && ME.is_super_admin && !isOff) ? ` <button class="linkbtn" data-acct-test="${r.id}" data-current="${r.is_test?1:0}" title="切换用途">标记为${r.is_test?'实际':'测试'}</button>` : '';
-  const ops = [];
-  if(ME) ops.push(`<button class="linkbtn" data-aid="${r.id}" data-auth="write">编辑</button>`);
-  if(ME && ME.is_super_admin) ops.push(`<button class="linkbtn del" data-acct-del="${r.id}" title="彻底删除">删除</button>`);
-  const levelCell=isOff?'<span class="pill" style="background:#1d4ed8;color:#fff">官方</span>':`<span class="pill ${LEVEL_CLASS[r.level]||'n'}">${r.level}</span>`;
-  return `<tr>
-    <td>${r.account_id}</td><td>${levelCell}</td><td><span class="pill ${STATUS_CLASS[r.status]||'n'}">${r.status}</span></td>
-    <td>${usage}${usageBtn}</td>
-    <td>${r.join_date||""}</td><td>${r.last_login_ip_display?escMsg(r.last_login_ip_display):'<span class="muted">—</span>'}</td><td>${r.last_login_device?escMsg(r.last_login_device):'<span class="muted">—</span>'}</td><td>${r.note||""}</td>
-    <td>${ops.length?ops.join(' '):'<span class="muted">—</span>'}</td></tr>`;
+function renderAcctCard(r){
+  const isOff=!!r.is_official, isAdm=!!r.is_admin, isSA=!!r.is_super_admin, isTest=!!r.is_test;
+  const sa = ME && ME.is_super_admin;
+  const badges=[];
+  badges.push(`<span class="pill ${LEVEL_CLASS[r.level]||'n'}">${r.level||''}</span>`);
+  badges.push(`<span class="pill ${STATUS_CLASS[r.status]||'n'}">${r.status||''}</span>`);
+  if(isOff) badges.push(`<span class="pill" style="background:#1d4ed8;color:#fff">官方</span>`);
+  if(isAdm) badges.push(`<span class="pill g">管理员</span>`);
+  if(isSA) badges.push(`<span class="pill" style="background:#7c2d12;color:#fff">超级管理员</span>`);
+  badges.push(`<span class="pill ${isTest?'y':'b'}">${isTest?'测试':'实际'}</span>`);
+  const heldRoles=(r.roles||[]).filter(x=>x.status==='在任' && AM_ROLES.includes(x.role)).map(x=>x.role+(x.scope?'<span class="muted">·'+escMsg(x.scope)+'</span>':''));
+  let roleActs="";
+  if(sa){
+    roleActs=(AM_ROLES||[]).map(role=>{
+      const held=(r.roles||[]).some(x=>x.role===role&&x.status==='在任');
+      return `<button class="linkbtn ${held?'del':''}" data-am-toggle="${escMsg(r.account_id)}" data-role="${escMsg(role)}" data-grant="${held?0:1}">${held?'取消':'设为'}${escMsg(role)}</button>`;
+    }).join("");
+  }
+  const ops=[];
+  if(ME) ops.push(`<button class="linkbtn" data-aid="${r.id}">编辑</button>`);
+  if(sa) ops.push(`<button class="linkbtn del" data-acct-del="${r.id}">删除</button>`);
+  if(sa && !isOff) ops.push(`<button class="linkbtn" data-acct-test="${r.id}" data-current="${isTest?1:0}">${isTest?'标记为实际':'标记为测试'}</button>`);
+  return `<div class="acct-card">
+    <div class="ac-top">
+      <div class="ac-id"><b>${escMsg(r.account_id)}</b>${r.display_name&&r.display_name!==r.account_id?`<span class="muted">${escMsg(r.display_name)}</span>`:''}</div>
+      <div class="ac-badges">${badges.join(' ')}</div>
+    </div>
+    <div class="ac-meta">
+      <span>最近登录：${r.last_login_ip_display?escMsg(r.last_login_ip_display):'<span class="muted">—</span>'}</span>
+      <span>现任管理角色：${heldRoles.length?heldRoles.map(x=>'<span class="tag">'+x+'</span>').join(' '):'<span class="muted">—</span>'}</span>
+    </div>
+    <div class="ac-actions">
+      ${roleActs?`<span class="ac-roles">${roleActs}</span>`:''}
+      ${ops.join(' ')||'<span class="muted">—</span>'}
+    </div>
+  </div>`;
 }
-async function loadAccts(){const d=await API("/api/accounts");
-  const official=d.rows.filter(r=>r.is_official), real=d.rows.filter(r=>!r.is_official&&!r.is_test), test=d.rows.filter(r=>!r.is_official&&r.is_test);
-  document.getElementById("acct-body").innerHTML=real.length?real.map(renderAcctRow).join(""):'<tr><td colspan="9" class="empty">暂无实际账号</td></tr>';
-  document.getElementById("acct-official-body").innerHTML=official.length?official.map(renderAcctRow).join(""):'<tr><td colspan="9" class="empty">暂无官方账号</td></tr>';
-  document.getElementById("acct-test-body").innerHTML=test.length?test.map(renderAcctRow).join(""):'<tr><td colspan="9" class="empty">暂无测试账号</td></tr>';
-  document.querySelectorAll("#acct-body [data-aid], #acct-official-body [data-aid], #acct-test-body [data-aid]").forEach(b=>b.onclick=()=>openAcct(b.dataset.aid));
-  document.querySelectorAll("#acct-body [data-acct-del], #acct-official-body [data-acct-del], #acct-test-body [data-acct-del]").forEach(b=>b.onclick=async()=>{
+function renderAcctList(){
+  const kw=(val("am-filter-kw")||"").trim().toLowerCase();
+  const fRole=val("am-filter-role");
+  const fOff=val("am-filter-official");
+  let rows=ALL_ACCTS.filter(r=>{
+    if(ACCT_QUICK==="real" && (r.is_official||r.is_test)) return false;
+    if(ACCT_QUICK==="official" && !r.is_official) return false;
+    if(ACCT_QUICK==="test" && (!r.is_official&&!r.is_test)) return false;
+    if(fOff!==""){ if(!!r.is_official!==(fOff==="1")) return false; }
+    if(kw && !(r.account_id.toLowerCase().includes(kw)||(r.display_name||"").toLowerCase().includes(kw))) return false;
+    if(fRole){
+      const held=(r.roles||[]).filter(x=>x.status==='在任'&&AM_ROLES.includes(x.role)).map(x=>x.role);
+      if(fRole==="_none_"){ if(held.length) return false; }
+      else if(!held.includes(fRole)) return false;
+    }
+    return true;
+  });
+  const box=document.getElementById("acct-list");
+  if(!box)return;
+  box.innerHTML=rows.length?rows.map(renderAcctCard).join(""):'<div class="empty">暂无符合条件的账号</div>';
+  box.querySelectorAll("[data-aid]").forEach(b=>b.onclick=()=>openAcct(b.dataset.aid));
+  box.querySelectorAll("[data-acct-del]").forEach(b=>b.onclick=async()=>{
     if(!requireAuth())return;
     const id=b.dataset.acctDel;
-    const row=d.rows.find(x=>String(x.id)===String(id));
+    const row=ALL_ACCTS.find(x=>String(x.id)===String(id));
     if(!row)return;
     if(!await UI.confirm(`确认彻底删除账号「${row.account_id}」？\n将同步删除其权限、日志、申请、管理员角色等全部关联数据，不可恢复。`))return;
     const res=await fetch("/api/accounts/"+id,{method:"DELETE",headers:j()}).then(r=>r.json());
@@ -1634,21 +1594,41 @@ async function loadAccts(){const d=await API("/api/accounts");
     await UI.alert("账号已彻底删除");
     loadAccts();loadOverview();loadLogs();
   });
-  document.querySelectorAll("#acct-body [data-acct-test], #acct-test-body [data-acct-test]").forEach(b=>b.onclick=async()=>{
+  box.querySelectorAll("[data-acct-test]").forEach(b=>b.onclick=async()=>{
     if(!requireAuth())return;
     const id=b.dataset.acctTest;
-    const cur=parseInt(b.dataset.current||"0",10);
-    const row=d.rows.find(x=>String(x.id)===String(id));
+    const row=ALL_ACCTS.find(x=>String(x.id)===String(id));
     if(!row)return;
-    const next=!cur;
-    const label=next?'测试账号':'实际账号';
+    const next=!parseInt(b.dataset.current||"0",10); const label=next?'测试账号':'实际账号';
     if(!await UI.confirm(`确认将「${row.account_id}」标记为 ${label}？`))return;
     const res=await fetch("/api/accounts/"+id+"/test",{method:"PUT",headers:j(),body:JSON.stringify({is_test:next?1:0})}).then(r=>r.json());
     if(res.error){await UI.alert("操作失败："+res.error);return;}
     showToast(`${row.account_id} 已标记为 ${label}`,"ok");
     loadAccts();loadOverview();loadLogs();
   });
-  loadPwdRequests();}
+  box.querySelectorAll("[data-am-toggle]").forEach(b=>b.onclick=async()=>{
+    if(!requireAuth())return;
+    const target=b.dataset.amToggle, role=b.dataset.role, grant=b.dataset.grant==="1";
+    if(grant&&AM_META.scoped[role]){openAmScope(target,role);return;}
+    if(!await UI.confirm("确认"+(grant?"设为":"取消")+"「"+role+"」："+target+"？"))return;
+    if(grant)await amGrant(target,role,"");
+    else await amRevoke(target,role);
+  });
+}
+async function loadAccts(){
+  const d=await API("/api/accounts");
+  if(d.error){await UI.alert("加载失败："+d.error);return;}
+  ALL_ACCTS=d.rows||[];
+  AM_ROLES=d.admin_roles||[];
+  AM_META={scoped:d.scoped_roles||{},domains:d.domains||[],groups:d.groups||[]};
+  const frole=document.getElementById("am-filter-role");
+  if(frole){frole.innerHTML='<option value="">全部角色</option><option value="_none_">无管理角色</option>'+(AM_ROLES.map(r=>'<option value="'+escMsg(r)+'">'+escMsg(r)+'</option>').join(""));refreshCustomSelect("am-filter-role");}
+  const al=document.getElementById("am-acct-list");
+  if(al) al.innerHTML=ALL_ACCTS.map(r=>'<option value="'+escMsg(r.account_id)+'"></option>').join("");
+  renderAcctList();
+  loadPwdRequests();
+  loadEvalRoleAssigns();
+}
 async function loadPwdRequests(){
   if(!(ME&&ME.is_super_admin))return;
   const card=document.getElementById("pwdreq-card");if(!card)return;
@@ -2234,8 +2214,8 @@ function showPage(p){
   const _map={overview:loadOverview,ledger:loadLedger,assess:()=>showSub("edit"),apply:()=>showApplySub("newapply"),discipline:()=>showDiscSub("violation"),audit:loadAudit,logs:loadLogs,dict:()=>showDictSub("accts"),myperms:loadMyPerms,permsort:loadPermSort,inbox:()=>showInboxSub("inbox"),system:loadSystem,logins:loadLoginLogs};if(_map[p])_map[p]();
 }
 function showDictSub(sub){document.querySelectorAll("#page-dict .subtab").forEach(b=>b.classList.toggle("active",b.dataset.dict===sub));
-  document.getElementById("dict-accts").style.display=sub==="accts"?"block":"none";document.getElementById("dict-cats").style.display=sub==="cats"?"block":"none";document.getElementById("dict-admin").style.display=sub==="admin"?"block":"none";
-  if(sub==="accts")loadAccts();else if(sub==="admin")loadAdminMgmt();}
+  document.getElementById("dict-accts").style.display=sub==="accts"?"block":"none";document.getElementById("dict-cats").style.display=sub==="cats"?"block":"none";
+  if(sub==="accts")loadAccts();}
 async function loadEvalRoleAssigns(){
   if(!(ME&&ME.is_super_admin))return;
   const tb=document.getElementById("er-body");if(!tb)return;
@@ -2278,12 +2258,9 @@ function bind(){
   document.querySelectorAll("#page-dict .subtab").forEach(b=>b.onclick=()=>showDictSub(b.dataset.dict));
   // 账号列表快捷筛选
   document.querySelectorAll(".acct-filter [data-acct-filter]").forEach(b=>b.onclick=()=>{
-    const f=b.dataset.acctFilter;
+    ACCT_QUICK=b.dataset.acctFilter;
     document.querySelectorAll(".acct-filter [data-acct-filter]").forEach(x=>x.classList.toggle("active",x===b));
-    const real=document.getElementById("acct-real-card"), official=document.getElementById("acct-official-card"), test=document.getElementById("acct-test-card");
-    if(real)real.style.display=(f==="real"||f==="all")?"block":"none";
-    if(official)official.style.display=(f==="official"||f==="all")?"block":"none";
-    if(test)test.style.display=(f==="test"||f==="all")?"block":"none";
+    renderAcctList();
   });
   document.getElementById("btn-query").onclick=()=>{ledgerPage=1;loadLedger();};
   document.getElementById("f-account").addEventListener("keydown",e=>{if(e.key==="Enter"){e.preventDefault();ledgerPage=1;loadLedger();}});
@@ -2389,11 +2366,17 @@ function bind(){
   document.getElementById("btn-vio-add").onclick=()=>openVio(null);
   document.getElementById("vio-cancel").onclick=()=>document.getElementById("modal-vio").classList.remove("show");
   document.getElementById("vio-save").onclick=saveVio;
-  // 管理员管理筛选（仅超级管理员）
+  // 账号管理筛选（仅超级管理员可设置/取消角色，但筛选对所有可见）
   const amFilter=document.getElementById("btn-am-filter");
-  if(amFilter)amFilter.onclick=loadAdminMgmt;
+  if(amFilter)amFilter.onclick=renderAcctList;
   const amReset=document.getElementById("btn-am-reset");
-  if(amReset)amReset.onclick=()=>{document.getElementById("am-filter-kw").value="";document.getElementById("am-filter-role").value="";document.getElementById("am-filter-official").value="";refreshCustomSelect("am-filter-role");refreshCustomSelect("am-filter-official");loadAdminMgmt();};
+  if(amReset)amReset.onclick=()=>{
+    ACCT_QUICK="all";
+    document.querySelectorAll(".acct-filter [data-acct-filter]").forEach(x=>x.classList.toggle("active",x.dataset.acctFilter==="all"));
+    document.getElementById("am-filter-kw").value="";document.getElementById("am-filter-role").value="";document.getElementById("am-filter-official").value="";
+    refreshCustomSelect("am-filter-role");refreshCustomSelect("am-filter-official");
+    renderAcctList();
+  };
   // 新建账号（仅超级管理员）
   const naBtn=document.getElementById("btn-new-account");
   if(naBtn)naBtn.onclick=()=>{

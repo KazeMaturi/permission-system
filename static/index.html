@@ -314,39 +314,51 @@
   <!-- 基础数据 -->
   <section id="page-dict" class="page">
     <div class="subtabs">
-      <button class="subtab active" data-dict="accts">账号（评审员）</button>
+      <button class="subtab active" data-dict="accts">账号管理</button>
       <button class="subtab" data-dict="cats">分类字典</button>
-      <button class="subtab" data-dict="admin" data-superadmin="1">管理员管理</button>
     </div>
     <div id="dict-accts" class="subpage">
       <div class="card" id="pwdreq-card" style="display:none" data-superadmin="1">
         <h3>待处理密码恢复申请<small id="pwdreq-count" style="color:var(--bad)"></small></h3>
         <table><thead><tr><th>账号</th><th>联系方式</th><th>申请时间</th><th>操作</th></tr></thead><tbody id="pwdreq-body"></tbody></table>
       </div>
-      <div class="toolbar acct-filter">
-        <span class="muted">快捷查看</span>
-        <button class="btn text active" data-acct-filter="real">实际账号</button>
-        <button class="btn text" data-acct-filter="official">官方账号</button>
-        <button class="btn text" data-acct-filter="test">测试账号</button>
-        <button class="btn text" data-acct-filter="all">全部</button>
+      <div class="card">
+        <div class="toolbar">
+          <div class="seg acct-filter">
+            <button class="segbtn active" data-acct-filter="all">全部</button>
+            <button class="segbtn" data-acct-filter="real">实际账号</button>
+            <button class="segbtn" data-acct-filter="official">官方账号</button>
+            <button class="segbtn" data-acct-filter="test">测试账号</button>
+          </div>
+          <span class="spacer"></span>
+          <label>管理角色
+            <select id="am-filter-role"><option value="">全部角色</option><option value="_none_">无管理角色</option></select>
+          </label>
+          <label>账号类型
+            <select id="am-filter-official"><option value="">全部</option><option value="1">官方账号</option><option value="0">普通账号</option></select>
+          </label>
+          <input id="am-filter-kw" placeholder="账号 / 昵称" style="width:150px">
+          <button class="btn" id="btn-am-filter">查询</button>
+          <button class="btn ghost" id="btn-am-reset">重置</button>
+          <span class="spacer"></span>
+          <button class="btn primary" id="btn-new-account" data-superadmin="1">+ 新建账号</button>
+        </div>
+        <div id="acct-list"></div>
       </div>
-      <div class="card" id="acct-real-card">
-        <h3>实际账号</h3>
-        <table id="acct-table"><thead><tr>
-          <th>账号</th><th>当前等级</th><th>状态</th><th>用途</th><th>入团/授权日</th><th>最近登录IP</th><th>设备码</th><th>备注</th><th>操作</th>
-        </tr></thead><tbody id="acct-body"></tbody></table>
-      </div>
-      <div class="card" id="acct-official-card" style="display:none">
-        <h3>官方账号</h3>
-        <table id="acct-official-table"><thead><tr>
-          <th>账号</th><th>当前等级</th><th>状态</th><th>用途</th><th>入团/授权日</th><th>最近登录IP</th><th>设备码</th><th>备注</th><th>操作</th>
-        </tr></thead><tbody id="acct-official-body"></tbody></table>
-      </div>
-      <div class="card" id="acct-test-card" style="display:none">
-        <h3>测试账号</h3>
-        <table id="acct-test-table"><thead><tr>
-          <th>账号</th><th>当前等级</th><th>状态</th><th>用途</th><th>入团/授权日</th><th>最近登录IP</th><th>设备码</th><th>备注</th><th>操作</th>
-        </tr></thead><tbody id="acct-test-body"></tbody></table>
+      <div class="card" id="er-card" data-superadmin="1">
+        <h3>评审角色绑定</h3>
+        <p class="hint">将评审三类角色（分类小组长 / 所属大团队质量组长 / 评审相关负责人）绑定到具体人员账号与分类（分类留空表示适用全部分类）；升级中审 / 分类扩充等申请的多角色评估流程按此绑定分工、不可跨权。</p>
+        <div class="toolbar">
+          <label>分类（可选）<input id="er-category" list="cat-list" placeholder="留空=全部分类"></label>
+          <label>评审角色<select id="er-role">
+            <option value="分类小组长">分类小组长</option>
+            <option value="所属大团队质量组长">所属大团队质量组长</option>
+            <option value="评审相关负责人">评审相关负责人</option>
+          </select></label>
+          <label>人员账号<input id="er-account" list="am-acct-list" placeholder="输入或选择账号"></label>
+          <button class="btn primary" id="btn-er-add">添加绑定</button>
+        </div>
+        <table id="er-table"><thead><tr><th>角色</th><th>人员账号</th><th>昵称</th><th>分类</th><th>绑定时间</th><th>操作</th></tr></thead><tbody id="er-body"></tbody></table>
       </div>
     </div>
     <div id="dict-cats" class="subpage" style="display:none">
@@ -357,45 +369,6 @@
           <button class="btn primary" id="btn-cat-add" data-superadmin="1">+ 新增分类</button>
         </div>
         <table id="dict-cats-table"><thead><tr><th>领域</th><th>二级组</th><th>分类</th><th>操作</th></tr></thead><tbody id="dict-cats-body"></tbody></table>
-      </div>
-    </div>
-    <div id="dict-admin" class="subpage" style="display:none" data-superadmin="1">
-      <p class="hint">仅超级管理员可见与可操作。在此为其余账号设置 / 取消「管理员」身份（管理角色：评审委员会成员 / 团队负责人 / 质量组长 / 特色小组长）。团队负责人与质量组长须指定所属<b>大团队</b>；特色小组长须指定所属<b>二级组</b>（二级组隶属大团队并涵盖具体分类，结构同《评审权限统计表》表头）。管理员身份决定其是否可执行违规删改、组长/委员会记录维护等管理动作。</p>
-      <div class="card">
-        <div class="toolbar">
-          <input id="am-filter-kw" placeholder="账号 / 昵称" style="width:160px">
-          <label>管理角色
-            <select id="am-filter-role"><option value="">全部角色</option><option value="_none_">无管理角色</option></select>
-          </label>
-          <label>账号类型
-            <select id="am-filter-official"><option value="">全部</option><option value="1">官方账号</option><option value="0">普通账号</option></select>
-          </label>
-          <button class="btn" id="btn-am-filter">查询</button>
-          <button class="btn ghost" id="btn-am-reset">重置</button>
-          <span class="spacer"></span>
-          <button class="btn" id="btn-new-account" data-superadmin="1">+ 新建账号</button>
-        </div>
-        <table id="am-table"><thead><tr>
-          <th>账号</th><th>等级</th><th>状态</th><th>是否管理员</th><th>是否超级管理员</th><th>是否官方账号</th><th>现任管理角色</th><th>操作</th>
-        </tr></thead><tbody id="am-body"></tbody></table>
-      </div>
-      <p class="hint" style="margin-top:14px">评审角色绑定（原「评审角色绑定」页签已并入此处）：将评审三类角色（分类小组长 / 所属大团队质量组长 / 评审相关负责人）绑定到具体人员账号与分类（分类留空表示适用全部分类）；<b>升级中审 / 分类扩充</b>等申请的多角色评估流程按此绑定分工、不可跨权。</p>
-      <div class="card">
-        <div class="toolbar">
-          <label>分类（可选）<input id="er-category" list="cat-list" placeholder="留空=全部分类"></label>
-          <label>评审角色<select id="er-role">
-            <option value="分类小组长">分类小组长</option>
-            <option value="所属大团队质量组长">所属大团队质量组长</option>
-            <option value="评审相关负责人">评审相关负责人</option>
-          </select></label>
-          <label>人员账号<input id="er-account" list="am-acct-list" placeholder="输入或选择账号"></label>
-          <button class="btn primary" id="btn-er-add">添加绑定</button>
-          <span class="spacer"></span>
-          <span class="muted" id="er-tip"></span>
-        </div>
-        <table id="er-table"><thead><tr>
-          <th>角色</th><th>人员账号</th><th>昵称</th><th>分类</th><th>绑定时间</th><th>操作</th>
-        </tr></thead><tbody id="er-body"></tbody></table>
       </div>
     </div>
   </section>
@@ -1023,6 +996,7 @@
 
 <datalist id="acct-list"></datalist>
 <datalist id="cat-list"></datalist>
+<datalist id="am-acct-list"></datalist>
 <datalist id="task-list"></datalist>
 
 <!-- 模态：违规登记（组长/委员会/质量组长） -->

@@ -1546,9 +1546,20 @@ class Handler(BaseHTTPRequestHandler):
                 out = []
                 for r in rows:
                     d = dict(r)
+                    d.pop("password", None)  # 不向前端暴露密码哈希
                     d["last_login_ip_display"] = ip_display(d.get("last_login_ip") or "")
+                    d["is_admin"] = is_admin(conn, d["account_id"])
+                    d["is_super_admin"] = is_super_admin(conn, d["account_id"])
+                    d["roles"] = [dict(x) for x in conn.execute(
+                        "SELECT role,status,scope FROM leader_record WHERE account_id=?", (d["account_id"],)).fetchall()]
                     out.append(d)
-                return self._send(200, dict(rows=out, account_levels=ACCOUNT_LEVELS))
+                domains = [x[0] for x in conn.execute("SELECT DISTINCT domain FROM category_dict ORDER BY domain")]
+                groups = [dict(group_name=x[0], domain=x[1]) for x in
+                          conn.execute("SELECT DISTINCT group_name, domain FROM category_dict ORDER BY domain, group_name")]
+                role_order = ["评审委员会成员", "团队负责人", "质量组长", EXTRA_ADMIN_ROLE]
+                return self._send(200, dict(rows=out, account_levels=ACCOUNT_LEVELS,
+                                            admin_roles=[r for r in role_order if r in (ADMIN_ROLES | {EXTRA_ADMIN_ROLE})],
+                                            scoped_roles=SCOPED_ADMIN_ROLES, domains=domains, groups=groups))
             if path == "/api/permissions":
                 filters = {k: g(k) for k in ("domain","group_name","category","perm_type","level","status","system_version","account_id","operator","effect_from","effect_to")}
                 if g("recycled") in ("0","1"): filters["recycled"] = g("recycled")

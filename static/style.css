@@ -481,3 +481,16 @@ tr.ib-unread td:first-child{box-shadow:inset 3px 0 0 var(--warn,#e08a00)}
 /* 操作链接删除样式 */
 .linkbtn.del{color:var(--bad)}
 .linkbtn.del:hover{color:#b91c1c}
+
+/* 账号管理：合并后的卡片式列表（避免宽表溢出） */
+#acct-list{display:flex;flex-direction:column;gap:10px}
+.acct-card{border:1px solid var(--line);border-radius:12px;padding:13px 15px;background:#fff;display:flex;flex-direction:column;gap:8px}
+.acct-card .ac-top{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.acct-card .ac-id{font-size:14.5px;display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+.acct-card .ac-id b{font-size:15px}
+.acct-card .ac-badges{display:flex;gap:6px;flex-wrap:wrap}
+.acct-card .ac-meta{display:flex;gap:18px;flex-wrap:wrap;font-size:12.5px;color:var(--sub);align-items:center}
+.acct-card .ac-meta .tag{margin:0 4px 0 0}
+.acct-card .ac-actions{display:flex;gap:8px 14px;flex-wrap:wrap;align-items:center;border-top:1px dashed var(--line);padding-top:8px}
+.acct-card .ac-roles{display:inline-flex;gap:2px;flex-wrap:wrap;padding-right:12px;margin-right:2px;border-right:1px solid var(--line)}
+.acct-card .ac-actions .muted{margin-left:auto}

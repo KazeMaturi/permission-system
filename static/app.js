@@ -154,8 +154,8 @@ async function loadSystem(){
   if(docCard) docCard.style.display=guest?"none":"block";
   if(flowCard) flowCard.style.display=guest?"none":"block";
   if(guest) return;
-  const pdfBase="/api/system-docs/百科任务评审团特色初优方向评审申请与考核制度_V20260904B.pdf";
-  const pdfUrl=TOKEN?pdfBase+"?token="+encodeURIComponent(TOKEN):pdfBase;
+  const pdfBase="/api/system-docs?file="+encodeURIComponent("百科任务评审团特色初优方向评审申请与考核制度_V20260904B.pdf");
+  const pdfUrl=TOKEN?pdfBase+"&token="+encodeURIComponent(TOKEN):pdfBase;
   const sysPdf=document.getElementById("sys-pdf");
   if(sysPdf && sysPdf.dataset.src){ sysPdf.src=pdfUrl; }
   const openBtn=document.getElementById("sys-open-pdf");
@@ -183,13 +183,16 @@ function openFlowPreview(n){
   const [file,title]=map[n]||["",""];
   if(!file) return;
   document.getElementById("flow-title").textContent=title;
-  document.getElementById("flow-img").src="/api/system-docs/"+file+(TOKEN?"?token="+encodeURIComponent(TOKEN):"");
+  document.getElementById("flow-img").src="/api/system-docs?file="+encodeURIComponent(file)+(TOKEN?"&token="+encodeURIComponent(TOKEN):"");
   document.getElementById("modal-flow").classList.add("show");
 }
 
 // ---------- 总览 ----------
 async function loadOverview(){
-  const d=await API("/api/overview"); const s=d.snapshot;
+  let d;
+  try { d=await API("/api/overview"); } catch(e){ d=null; }
+  if(!d || d.error || !d.snapshot){ document.getElementById("kpis").innerHTML='<div class="empty">总览加载失败或无权限</div>'; return; }
+  const s=d.snapshot;
   const kpis=[
     {l:"账号总数",v:s.total_acct},{l:"启用分类",v:s.total_cat},{l:"权限记录",v:s.total_perm},
     {l:"正常率",v:s.active_rate+"%",cls:"ok"},
@@ -201,8 +204,10 @@ async function loadOverview(){
   donutChart(document.getElementById("chart-astatus"),sd.map((x,i)=>({label:x.status,value:x.c,color:PALETTE[i%PALETTE.length]})));
   if(d.assess){
     donutChart(document.getElementById("chart-pass"),[{label:"通过",value:d.assess.passed,color:"#15a34a"},{label:"不通过",value:d.assess.fail,color:"#e0413e"}]);
-    const tr=await API("/api/assess/stats?period="+d.latest_period);
-    lineChart(document.getElementById("chart-trend"),tr.trend.map(t=>({label:t.period,value:t.pass_rate})),{color:"#0ea5e9"});
+    try {
+      const tr=await API("/api/assess/stats?period="+d.latest_period);
+      lineChart(document.getElementById("chart-trend"),(tr.trend||[]).map(t=>({label:t.period,value:t.pass_rate})),{color:"#0ea5e9"});
+    } catch(e){ document.getElementById("chart-trend").innerHTML='<div class="empty">趋势加载失败</div>'; }
   } else {document.getElementById("chart-pass").innerHTML='<div class="empty">暂无考核数据</div>';document.getElementById("chart-trend").innerHTML='<div class="empty">暂无考核数据</div>';}
   loadStats();
 }
@@ -1406,7 +1411,7 @@ async function createAccount(){
   const res=await fetch("/api/accounts",{method:"POST",headers:j(),body:JSON.stringify(body)}).then(x=>x.json());
   if(res.error){await UI.alert("创建失败："+res.error);return;}
   document.getElementById("modal-new-account").classList.remove("show");
-  await UI.alert("已创建账号："+account_id+(body.is_official?"（官方账号·管理员级别）":(body.is_admin?"（管理员级别）":"")));
+  await UI.alert("已创建账号："+account_id+(body.is_official?"（官方账号·超级管理员级别）":(body.is_admin?"（管理员级别）":"")));
   loadAccts();
 }
 
@@ -2125,7 +2130,7 @@ function loadToken(){ try{ return localStorage.getItem("pcs_token"); }catch(e){ 
 async function loadMe(){
   const t=loadToken(); if(!t){ME=null; renderUser(); return;}
   const d=await fetch("/api/me",{headers:{"Authorization":"Bearer "+t}}).then(r=>r.json()).catch(()=>({account_id:null}));
-  if(d.account_id){TOKEN=t; ME={account_id:d.account_id,level:d.level,status:d.status,is_reviewer:d.is_reviewer,is_admin:d.is_admin,is_senior:!!d.is_senior,is_super_admin:!!d.is_super_admin,eval_roles:d.eval_roles||[]};} else {setToken(null); ME=null;}
+  if(d.account_id){TOKEN=t; ME={account_id:d.account_id,level:d.level,status:d.status,is_reviewer:d.is_reviewer,is_admin:d.is_admin,is_senior:!!d.is_senior,is_super_admin:!!d.is_super_admin,is_official:!!d.is_official,eval_roles:d.eval_roles||[]};} else {setToken(null); ME=null;}
   renderUser();
 }
 function renderUser(){
@@ -2136,7 +2141,7 @@ function renderUser(){
   if(ME&&ME.account_id){
     box.style.display="inline-flex";
     const rolePill=ME.is_super_admin?'<span class="pill lv3" style="background:#7c2d12;color:#fff">超级管理员</span>':ME.is_admin?'<span class="pill lv3" style="background:var(--bad-soft);color:var(--bad)">管理员</span>':ME.is_senior?'<span class="pill lv3">高审</span>':ME.is_reviewer?'<span class="pill lv3">中审</span>':'';
-    box.innerHTML=`<button class="btn ghost sm inbox-btn" id="btn-inbox" title="站内信箱"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>站内信<span class="inbox-badge" id="inbox-badge" style="display:none">0</span></button><span class="uinfo">${ME.account_id} · <b>${ME.level||""}</b>${rolePill}</span><button class="btn ghost sm" id="btn-chpw">修改密码</button><button class="btn ghost sm" id="btn-logout">退出</button>`;
+    box.innerHTML=`<button class="btn ghost sm inbox-btn" id="btn-inbox" title="站内信箱"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>站内信<span class="inbox-badge" id="inbox-badge" style="display:none">0</span></button><span class="uinfo">${ME.account_id} · ${ME.is_official?'<b>官方</b>':`<b>${ME.level||""}</b>`}${rolePill}</span><button class="btn ghost sm" id="btn-chpw">修改密码</button><button class="btn ghost sm" id="btn-logout">退出</button>`;
     document.getElementById("btn-logout").onclick=doLogout;
     document.getElementById("btn-chpw").onclick=openChangePw;
     document.getElementById("btn-inbox").onclick=()=>showPage("inbox");
@@ -2158,8 +2163,10 @@ async function doLogin(){const acc=document.getElementById("lg-account").value.t
   const res=await fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({account_id:acc,password:pwd,device_id:getDeviceId()})}).then(r=>r.json()).catch(e=>({error:e.message}));
   if(res.error){msg.textContent="登录失败："+res.error; msg.style.color="var(--bad)"; return;}
   if(!res.token){msg.textContent="登录失败：账号或密码错误"; msg.style.color="var(--bad)"; return;}
-  setToken(res.token); ME={account_id:res.account_id,level:res.level,status:res.status,is_reviewer:res.is_reviewer,is_admin:res.is_admin,is_senior:!!res.is_senior,is_super_admin:!!res.is_super_admin,eval_roles:res.eval_roles||[]};
+  setToken(res.token); ME={account_id:res.account_id,level:res.level,status:res.status,is_reviewer:res.is_reviewer,is_admin:res.is_admin,is_senior:!!res.is_senior,is_super_admin:!!res.is_super_admin,is_official:!!res.is_official,eval_roles:res.eval_roles||[]};
   document.getElementById("modal-login").classList.remove("show"); renderUser();
+  // 登录后重新渲染当前已打开的页面（如总览），否则其图表/统计因登录前未鉴权而未加载
+  const _ap=document.querySelector(".page.active"); if(_ap) showPage(_ap.id.replace("page-",""));
   // 刷新依赖权限的视图；若当前在制度页则只重载该页资源，否则整页刷新使受保护资源可见
   if(document.getElementById("page-system").classList.contains("active")){ loadSystem(); showToast("登录成功："+res.account_id+(res.is_reviewer?"（审核员）":""),"ok"); }
   else { showToast("登录成功，正在刷新页面…","ok"); location.reload(); }
@@ -2566,4 +2573,4 @@ function bind(){
   document.getElementById("audit-search").oninput=renderAudit;
 }
 
-(async function(){await loadDict();await loadPeriods();bind();await loadMe();showPage("ledger");startReqStarsWatcher();window.addEventListener("resize",()=>{const p=document.querySelector(".navbtn.active")?.dataset.page;if(p==="overview")loadOverview();if(p==="assess"&&document.getElementById("sub-summary").style.display!=="none")loadSummary();});})();
+(async function(){await loadDict();await loadPeriods();bind();await loadMe();showPage("overview");startReqStarsWatcher();window.addEventListener("resize",()=>{const p=document.querySelector(".navbtn.active")?.dataset.page;if(p==="overview")loadOverview();if(p==="assess"&&document.getElementById("sub-summary").style.display!=="none")loadSummary();});})();

@@ -156,13 +156,17 @@ def is_senior(conn, account_id):
 # 高于 is_admin，仅在必要时（授权管理）使用的精英账号集合。
 SUPER_ADMIN_ACCOUNTS = {"Adzwlqxm"}
 def is_super_admin(conn, account_id):
-    """超级管理员：默认 Adzwlqxm，或经 admin_grant 能力授予的账号。
+    """超级管理员：默认 Adzwlqxm，或经 admin_grant 能力授予的账号，或官方账号。
 
     注意：不得通过 has_cap(admin_grant) 判定，否则会与 CAPS 中 admin_grant 的
-    base=is_super_admin 形成互相递归（RecursionError）。此处直接查 account_capability。"""
+    base=is_super_admin 形成互相递归（RecursionError）。此处直接查 account_capability
+    与 account.is_official，二者均为直接查询，无递归风险。官方账号默认即超级管理员。"""
     if not account_id:
         return False
     if account_id in SUPER_ADMIN_ACCOUNTS:
+        return True
+    r = conn.execute("SELECT 1 FROM account WHERE account_id=? AND COALESCE(is_official,0)=1", (account_id,)).fetchone()
+    if r:
         return True
     r = conn.execute("SELECT 1 FROM account_capability WHERE account_id=? AND capability='admin_grant' AND granted=1", (account_id,)).fetchone()
     return bool(r)
@@ -1401,11 +1405,13 @@ class Handler(BaseHTTPRequestHandler):
             conn.commit()
         except Exception:
             pass
+        is_official = bool(conn.execute("SELECT 1 FROM account WHERE account_id=? AND COALESCE(is_official,0)=1", (r["account_id"],)).fetchone())
         return self._send(200, dict(token=token, account_id=r["account_id"], level=r["level"], status=r["status"],
                                      is_reviewer=has_cap(conn, r["account_id"], "upgrade_review"),
                                      is_admin=has_cap(conn, r["account_id"], "system_admin"),
                                      is_senior=has_cap(conn, r["account_id"], "violation_register"),
-                                     is_super_admin=has_cap(conn, r["account_id"], "admin_grant")))
+                                     is_super_admin=is_super_admin(conn, r["account_id"]),
+                                     is_official=is_official))
 
     def _me(self, qs):
         # 仅接受 Authorization: Bearer 头，避免 token 泄露到日志/历史
@@ -1422,12 +1428,14 @@ class Handler(BaseHTTPRequestHandler):
         conn = get_conn()
         try:
             r = conn.execute("SELECT account_id,level,status FROM account WHERE account_id=?", (aid,)).fetchone()
+            is_official = bool(conn.execute("SELECT 1 FROM account WHERE account_id=? AND COALESCE(is_official,0)=1", (aid,)).fetchone())
             return self._send(200, dict(account_id=aid, level=r["level"], status=r["status"],
                                          is_reviewer=has_cap(conn, aid, "upgrade_review"),
-                                         is_admin=has_cap(conn, aid, "system_admin"),
-                                         is_senior=has_cap(conn, aid, "violation_register"),
-                                         is_super_admin=has_cap(conn, aid, "admin_grant"),
-                                         eval_roles=get_eval_roles(conn, aid)))
+                                     is_admin=has_cap(conn, aid, "system_admin"),
+                                     is_senior=has_cap(conn, aid, "violation_register"),
+                                     is_super_admin=is_super_admin(conn, aid),
+                                     is_official=is_official,
+                                     eval_roles=get_eval_roles(conn, aid)))
         finally:
             conn.close()
 
@@ -1444,9 +1452,14 @@ class Handler(BaseHTTPRequestHandler):
         m = re.match(r"^/api/screenshots/(.+)$", path)
         if m:
             return self._serve_screenshot(m.group(1))
-        m = re.match(r"^/api/system-docs/(.+)$", path)
+        m = re.match(r"^/api/system-docs(?:/(.*))?$", path)
         if m:
-            return self._serve_system_doc(m.group(1))
+            # 优先使用 ?file= 查询参数（对中文文件名更稳健，规避 WSGI 对 PATH_INFO 的 latin-1 解码问题）；
+            # 同时兼容 /api/system-docs/<文件名> 路径式写法。
+            rel = (qs.get("file", [None])[0] or m.group(1) or "").strip()
+            if not rel:
+                return self._send(400, {"error": "缺少文件参数"})
+            return self._serve_system_doc(rel)
         if path.startswith("/static/"):
             return self._static_file(os.path.basename(path))
         if path.startswith("/api/"):
@@ -1531,7 +1544,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._account_eval_roles(conn, aid, int(m.group(1)), "GET")
             if path == "/api/overview":
                 aid = self._auth_account(conn)
-                if not has_cap(conn, aid, "system_admin"):
+                if not (is_admin(conn, aid) or cap_override(conn, aid, "system_admin") == 1
+                        or cap_override(conn, aid, "admin_grant") == 1):
                     return self._send(403, {"error": "无权限：总览已归入系统管理，仅管理员可访问"})
                 snap = snapshot(conn)
                 status_dist = conn.execute("SELECT status, COUNT(*) c FROM account GROUP BY status").fetchall()
@@ -1597,7 +1611,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._perm_matrix(conn, qs)
             if path == "/api/stats":
                 aid = self._auth_account(conn)
-                if not has_cap(conn, aid, "system_admin"):
+                if not (is_admin(conn, aid) or cap_override(conn, aid, "system_admin") == 1
+                        or cap_override(conn, aid, "admin_grant") == 1):
                     return self._send(403, {"error": "无权限：统计已归入系统管理，仅管理员可访问"})
                 filters = {k: g(k) for k in ("domain","group_name","category","perm_type","level","status","system_version","account_id","operator","effect_from","effect_to")}
                 filters["dim"] = g("dim") or "domain"
@@ -4600,7 +4615,7 @@ class Handler(BaseHTTPRequestHandler):
         is_official = 1 if b.get("is_official") else 0
         is_admin = bool(b.get("is_admin"))
         if is_official:
-            is_admin = True  # 官方账号默认管理员级别
+            is_admin = True  # 官方账号默认超级管理员级别
         level = (b.get("level") or "中审").strip()
         if level not in ACCOUNT_LEVELS:
             level = "中审"
@@ -4609,9 +4624,14 @@ class Handler(BaseHTTPRequestHandler):
                        VALUES(?,?,?, '正常',0,?,?)""",
                      (account_id, default_pw(account_id) if not pw else hash_pw(pw), level, is_official, now))
         if is_admin:
-            conn.execute("""INSERT INTO account_capability(account_id,capability,granted,operator,reason,created_at,updated_at)
+            # 官方账号默认超级管理员：同时授予 system_admin 与 admin_grant（幂等）
+            conn.execute("""INSERT OR IGNORE INTO account_capability(account_id,capability,granted,operator,reason,created_at,updated_at)
                            VALUES(?, 'admin_grant',1,?,?,?,?)""",
-                         (account_id, aid, "新建官方账号时默认授予管理员级别" if is_official else "新建账号时授予管理员", now, now))
+                         (account_id, aid, "新建官方账号时默认授予超级管理员级别" if is_official else "新建账号时授予管理员", now, now))
+            if is_official:
+                conn.execute("""INSERT OR IGNORE INTO account_capability(account_id,capability,granted,operator,reason,created_at,updated_at)
+                               VALUES(?, 'system_admin',1,?,?,?,?)""",
+                             (account_id, aid, "新建官方账号时默认授予超级管理员级别", now, now))
         conn.execute("INSERT INTO change_log(permission_id,action,account_id,operator,change_time,detail) VALUES(?,?,?,?,?,?)",
                      (0, "新建账号", account_id, aid, now,
                       "超级管理员 %s 创建账号 %s（官方账号：%s；管理员：%s）" % (aid, account_id, "是" if is_official else "否", "是" if is_admin else "否")))

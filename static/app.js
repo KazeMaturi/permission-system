@@ -2578,4 +2578,4 @@ function bind(){
   document.getElementById("audit-search").oninput=renderAudit;
 }
 
-(async function(){await loadDict();await loadPeriods();bind();await loadMe();if(ME&&(ME.is_admin||ME.is_super_admin)){showPage("overview");}else{showPage("ledger");}startReqStarsWatcher();window.addEventListener("resize",()=>{const p=document.querySelector(".navbtn.active")?.dataset.page;if(p==="overview")loadOverview();if(p==="assess"&&document.getElementById("sub-summary").style.display!=="none")loadSummary();});})();
+(async function(){await loadDict();await loadPeriods();bind();await loadMe();showPage("ledger");startReqStarsWatcher();window.addEventListener("resize",()=>{const p=document.querySelector(".navbtn.active")?.dataset.page;if(p==="overview")loadOverview();if(p==="assess"&&document.getElementById("sub-summary").style.display!=="none")loadSummary();});})();

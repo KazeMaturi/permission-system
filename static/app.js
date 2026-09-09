@@ -1411,7 +1411,7 @@ async function createAccount(){
   const res=await fetch("/api/accounts",{method:"POST",headers:j(),body:JSON.stringify(body)}).then(x=>x.json());
   if(res.error){await UI.alert("创建失败："+res.error);return;}
   document.getElementById("modal-new-account").classList.remove("show");
-  await UI.alert("已创建账号："+account_id+(body.is_official?"（官方账号·超级管理员级别）":(body.is_admin?"（管理员级别）":"")));
+  await UI.alert("已创建账号："+account_id+(body.is_official?"（官方账号·管理员级别）":(body.is_admin?"（管理员级别）":"")));
   loadAccts();
 }
 
@@ -2140,7 +2140,7 @@ function renderUser(){
   updateAdminNav();
   if(ME&&ME.account_id){
     box.style.display="inline-flex";
-    const rolePill=ME.is_super_admin?'<span class="pill lv3" style="background:#7c2d12;color:#fff">超级管理员</span>':ME.is_admin?'<span class="pill lv3" style="background:var(--bad-soft);color:var(--bad)">管理员</span>':ME.is_senior?'<span class="pill lv3">高审</span>':ME.is_reviewer?'<span class="pill lv3">中审</span>':'';
+    const rolePill=ME.is_super_admin?'<span class="pill lv3" style="background:#7c2d12;color:#fff">超级管理员</span>':(ME.is_admin||ME.is_official)?'<span class="pill lv3" style="background:var(--bad-soft);color:var(--bad)">管理员</span>':ME.is_senior?'<span class="pill lv3">高审</span>':ME.is_reviewer?'<span class="pill lv3">中审</span>':'';
     box.innerHTML=`<button class="btn ghost sm inbox-btn" id="btn-inbox" title="站内信箱"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>站内信<span class="inbox-badge" id="inbox-badge" style="display:none">0</span></button><span class="uinfo">${ME.account_id} · ${ME.is_official?'<b>官方</b>':`<b>${ME.level||""}</b>`}${rolePill}</span><button class="btn ghost sm" id="btn-chpw">修改密码</button><button class="btn ghost sm" id="btn-logout">退出</button>`;
     document.getElementById("btn-logout").onclick=doLogout;
     document.getElementById("btn-chpw").onclick=openChangePw;

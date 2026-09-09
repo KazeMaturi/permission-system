@@ -156,17 +156,17 @@ def is_senior(conn, account_id):
 # 高于 is_admin，仅在必要时（授权管理）使用的精英账号集合。
 SUPER_ADMIN_ACCOUNTS = {"Adzwlqxm"}
 def is_super_admin(conn, account_id):
-    """超级管理员：默认 Adzwlqxm，或经 admin_grant 能力授予的账号，或官方账号。
+    """超级管理员：默认 Adzwlqxm，或经 admin_grant 能力授予的账号。
 
     注意：不得通过 has_cap(admin_grant) 判定，否则会与 CAPS 中 admin_grant 的
-    base=is_super_admin 形成互相递归（RecursionError）。此处直接查 account_capability
-    与 account.is_official，二者均为直接查询，无递归风险。官方账号默认即超级管理员。"""
+    base=is_super_admin 形成互相递归（RecursionError）。此处直接查 account_capability，
+    为直接查询，无递归风险。
+
+    官方账号(is_official=1)【不属于】超级管理员：仅作「管理员」展示分类，不携带
+    system_admin/admin_grant 能力，因此无系统管理权限。"""
     if not account_id:
         return False
     if account_id in SUPER_ADMIN_ACCOUNTS:
-        return True
-    r = conn.execute("SELECT 1 FROM account WHERE account_id=? AND COALESCE(is_official,0)=1", (account_id,)).fetchone()
-    if r:
         return True
     r = conn.execute("SELECT 1 FROM account_capability WHERE account_id=? AND capability='admin_grant' AND granted=1", (account_id,)).fetchone()
     return bool(r)
@@ -4602,7 +4602,7 @@ class Handler(BaseHTTPRequestHandler):
         conn.commit()
         return self._send(200, {"ok": True, "new_password": new_pw})
 
-    # ---- 超级管理员：直接创建账号（含官方账号，默认管理员级别） ----
+    # ---- 超级管理员：直接创建账号（含官方账号；官方账号仅作「管理员」展示，无系统管理权限） ----
     def _create_account(self, conn, aid, b):
         if not is_super_admin(conn, aid):
             return self._send(403, {"error": "无权限：仅超级管理员可直接创建账号"})
@@ -4613,9 +4613,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(409, {"error": "账号已存在：%s" % account_id})
         pw = (b.get("password") or "").strip()
         is_official = 1 if b.get("is_official") else 0
-        is_admin = bool(b.get("is_admin"))
-        if is_official:
-            is_admin = True  # 官方账号默认超级管理员级别
+        # 官方账号(is_official=1)：属于「管理员」展示分类，但【不是超级管理员】、
+        # 不授予 system_admin/admin_grant 能力（无系统管理权限）。其管理员身份仅用于前端展示，
+        # 故即使勾选了「管理员」复选框也不授予任何能力。
+        is_admin = bool(b.get("is_admin")) and (not is_official)
         level = (b.get("level") or "中审").strip()
         if level not in ACCOUNT_LEVELS:
             level = "中审"
@@ -4624,14 +4625,10 @@ class Handler(BaseHTTPRequestHandler):
                        VALUES(?,?,?, '正常',0,?,?)""",
                      (account_id, default_pw(account_id) if not pw else hash_pw(pw), level, is_official, now))
         if is_admin:
-            # 官方账号默认超级管理员：同时授予 system_admin 与 admin_grant（幂等）
+            # 普通管理员账号：授予 admin_grant 能力（系统管理权限）。官方账号不进入此分支。
             conn.execute("""INSERT OR IGNORE INTO account_capability(account_id,capability,granted,operator,reason,created_at,updated_at)
                            VALUES(?, 'admin_grant',1,?,?,?,?)""",
-                         (account_id, aid, "新建官方账号时默认授予超级管理员级别" if is_official else "新建账号时授予管理员", now, now))
-            if is_official:
-                conn.execute("""INSERT OR IGNORE INTO account_capability(account_id,capability,granted,operator,reason,created_at,updated_at)
-                               VALUES(?, 'system_admin',1,?,?,?,?)""",
-                             (account_id, aid, "新建官方账号时默认授予超级管理员级别", now, now))
+                         (account_id, aid, "新建账号时授予管理员", now, now))
         conn.execute("INSERT INTO change_log(permission_id,action,account_id,operator,change_time,detail) VALUES(?,?,?,?,?,?)",
                      (0, "新建账号", account_id, aid, now,
                       "超级管理员 %s 创建账号 %s（官方账号：%s；管理员：%s）" % (aid, account_id, "是" if is_official else "否", "是" if is_admin else "否")))

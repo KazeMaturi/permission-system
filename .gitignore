@@ -13,6 +13,8 @@ data/del_debug.log
 permissions.db
 permission.db
 permission.db.bak*
+permission_*.db
+permission_test.db
 permission_backup_*
 sheet_raw.txt
 

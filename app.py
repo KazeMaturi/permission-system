@@ -27,7 +27,20 @@ from datetime import timezone, timedelta
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 STATIC_DIR = os.path.join(BASE_DIR, "static")
-DB_PATH = os.path.join(BASE_DIR, "permission.db")
+
+# 部署环境区分（"区分口"）：通过环境变量 DEPLOY_ENV 选择数据库文件，
+# 实现 本地开发 / 对外测试 / 生产上线 三套数据相互隔离，避免把测试草稿或
+# 本地数据直接污染生产库。
+#   - 默认 / 未设置 / prod  -> permission.db      （生产 / 上线环境）
+#   - test                  -> permission_test.db （对外测试环境）
+# 本地开发不设置 DEPLOY_ENV，使用 permission.db；云端测试 Web app 在
+# PythonAnywhere 控制台 Web 页的「Environment variables」里设 DEPLOY_ENV=test 即可切换。
+# 账号数据同步请走 sync_cloud_db.sh（按 test/prod 显式指定 + 二次确认），不要直接覆盖生产库。
+DEPLOY_ENV = os.environ.get("DEPLOY_ENV", "dev").lower()
+if DEPLOY_ENV == "test":
+    DB_PATH = os.path.join(BASE_DIR, "permission_test.db")
+else:
+    DB_PATH = os.path.join(BASE_DIR, "permission.db")
 
 # 系统时间统一使用固定 UTC+8（北京时间），不随服务器本地时区变化
 TZ_CN = timezone(timedelta(hours=8), name="CST")

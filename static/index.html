@@ -345,21 +345,6 @@
         </div>
         <div id="acct-list"></div>
       </div>
-      <div class="card" id="er-card" data-superadmin="1">
-        <h3>评审角色绑定</h3>
-        <p class="hint">将评审三类角色（分类小组长 / 所属大团队质量组长 / 评审相关负责人）绑定到具体人员账号与分类（分类留空表示适用全部分类）；升级中审 / 分类扩充等申请的多角色评估流程按此绑定分工、不可跨权。</p>
-        <div class="toolbar">
-          <label>分类（可选）<input id="er-category" list="cat-list" placeholder="留空=全部分类"></label>
-          <label>评审角色<select id="er-role">
-            <option value="分类小组长">分类小组长</option>
-            <option value="所属大团队质量组长">所属大团队质量组长</option>
-            <option value="评审相关负责人">评审相关负责人</option>
-          </select></label>
-          <label>人员账号<input id="er-account" list="am-acct-list" placeholder="输入或选择账号"></label>
-          <button class="btn primary" id="btn-er-add">添加绑定</button>
-        </div>
-        <table id="er-table"><thead><tr><th>角色</th><th>人员账号</th><th>昵称</th><th>分类</th><th>绑定时间</th><th>操作</th></tr></thead><tbody id="er-body"></tbody></table>
-      </div>
     </div>
     <div id="dict-cats" class="subpage" style="display:none">
       <div class="card">
@@ -749,6 +734,20 @@
     <div class="alert-body">
       <b>重置密码风险提示</b>
       <span>系统将生成 12 位随机密码并覆盖原密码，新密码明文仅展示一次，请当场复制并告知对方。</span>
+    </div>
+  </div>
+  <div class="card-block" id="a-roles-wrap" data-superadmin="1" style="display:none">
+    <h4>评审角色绑定</h4>
+    <p class="hint">将评审三类角色（分类小组长 / 所属大团队质量组长 / 评审相关负责人）绑定到该账号；分类留空＝适用全部分类。升级中审 / 分类扩充等申请的多角色评估流程按此分工、不可跨权。</p>
+    <div id="a-roles-list" class="tag-list"></div>
+    <div class="toolbar">
+      <label>评审角色<select id="a-role">
+        <option value="分类小组长">分类小组长</option>
+        <option value="所属大团队质量组长">所属大团队质量组长</option>
+        <option value="评审相关负责人">评审相关负责人</option>
+      </select></label>
+      <label>分类（可选）<input id="a-role-cat" list="cat-list" placeholder="留空=全部分类"></label>
+      <button class="btn primary" id="a-role-add">添加角色</button>
     </div>
   </div>
   <div class="modal-actions"><button class="btn ghost" id="acct-cancel">取消</button><button class="btn" id="acct-resetpw" style="display:none">重置密码</button><button class="btn primary" id="acct-save" data-auth="write">保存</button></div>

@@ -168,11 +168,19 @@ def is_super_admin(conn, account_id):
     return bool(r)
 
 def get_eval_roles(conn, account_id):
-    """返回账号在 eval_role_assign 中绑定的评审角色列表；超级管理员额外隐含「评审相关负责人」权限。"""
+    """返回账号绑定的评审角色列表（数据已整合进 account.eval_roles JSON 字段）；
+    超级管理员额外隐含「评审相关负责人」权限。仅按角色判定，与分类无关（不可跨权校验只需角色一致）。"""
     if not account_id:
         return []
-    rows = conn.execute("SELECT DISTINCT role FROM eval_role_assign WHERE account_id=?", (account_id,)).fetchall()
-    roles = [r["role"] for r in rows if r["role"] in EVAL_REVIEW_ROLES]
+    roles = []
+    try:
+        er = conn.execute("SELECT eval_roles FROM account WHERE account_id=?", (account_id,)).fetchone()
+        if er and er["eval_roles"]:
+            for it in (json.loads(er["eval_roles"]) or []):
+                if isinstance(it, dict) and it.get("role") in EVAL_REVIEW_ROLES and it["role"] not in roles:
+                    roles.append(it["role"])
+    except Exception:
+        pass
     if is_super_admin(conn, account_id) and "评审相关负责人" not in roles:
         roles.append("评审相关负责人")
     return roles
@@ -761,15 +769,6 @@ def init_db():
         scope_type TEXT DEFAULT 'user',
         created_at TEXT,
         updated_at TEXT);
-    CREATE TABLE IF NOT EXISTS eval_role_assign(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        role TEXT NOT NULL,                -- 评审角色：分类小组长 / 所属大团队质量组长 / 评审相关负责人
-        account_id TEXT NOT NULL,          -- 被绑定的具体人员账号
-        category TEXT DEFAULT '',          -- 关联分类（空字符串=适用于全部分类）
-        created_at TEXT, updated_at TEXT,
-        UNIQUE(role, account_id, category));
-    CREATE INDEX IF NOT EXISTS idx_evalrole_role ON eval_role_assign(role);
-    CREATE INDEX IF NOT EXISTS idx_evalrole_acct ON eval_role_assign(account_id);
     CREATE INDEX IF NOT EXISTS idx_perm_acct ON permission(account_id);
     CREATE INDEX IF NOT EXISTS idx_exempt ON assess_exemption(account_id, period);
     CREATE INDEX IF NOT EXISTS idx_perm_cat ON permission(category);
@@ -1368,49 +1367,6 @@ class Handler(BaseHTTPRequestHandler):
         self._send(403, {"error": "无权限：仅本人或管理角色可操作该记录"})
         return False
 
-    def _eval_role_assigns(self, conn, aid, method, eid=None, b=None):
-        """评审角色身份绑定（不可跨权）：仅超级管理员可读写；GET 列表 / POST 新增 / DELETE 删除。"""
-        now = _now()
-        if not is_super_admin(conn, aid):
-            return self._send(403, {"error": "无权限：评审角色绑定仅超级管理员可管理"})
-        if method == "GET":
-            role = (b or {}).get("role") or ""
-            cat = (b or {}).get("category")
-            where = "WHERE 1=1"; params = []
-            if role:
-                where += " AND role=?"; params.append(role)
-            if cat:
-                where += " AND category=?"; params.append(cat)
-            rows = conn.execute(
-                "SELECT a.*, ac.account_id AS display_name FROM eval_role_assign a LEFT JOIN account ac ON a.account_id=ac.account_id %s ORDER BY a.role, a.category, a.account_id" % where,
-                params).fetchall()
-            return self._send(200, dict(rows=[dict(r) for r in rows], roles=EVAL_REVIEW_ROLES))
-        if method == "POST":
-            role = (b.get("role") or "").strip()
-            account_id = (b.get("account_id") or "").strip()
-            category = (b.get("category") or "").strip()
-            if role not in EVAL_REVIEW_ROLES:
-                return self._send(400, {"error": "评审角色非法：应为 %s 之一" % " / ".join(EVAL_REVIEW_ROLES)})
-            if not account_id:
-                return self._send(400, {"error": "被绑定账号为必填"})
-            acct = conn.execute("SELECT 1 FROM account WHERE account_id=?", (account_id,)).fetchone()
-            if not acct:
-                return self._send(400, {"error": "账号不存在：%s" % account_id})
-            try:
-                conn.execute("INSERT INTO eval_role_assign(role,account_id,category,created_at,updated_at) VALUES(?,?,?,?,?)",
-                             (role, account_id, category, now, now))
-                conn.commit()
-            except Exception as e:
-                return self._send(400, {"error": "新增失败（可能已存在相同绑定）：%s" % e})
-            return self._send(200, {"ok": True})
-        if method == "DELETE":
-            if not eid:
-                return self._send(400, {"error": "缺少绑定记录 id"})
-            conn.execute("DELETE FROM eval_role_assign WHERE id=?", (eid,))
-            conn.commit()
-            return self._send(200, {"ok": True})
-        return self._send(405, {"error": "method not allowed"})
-
     def _perm_suspended(self, conn, account_id, category):
         """该账号在该分类的权限是否处于停审（严重/重大违规挂起）。"""
         if not account_id or not category:
@@ -1569,6 +1525,10 @@ class Handler(BaseHTTPRequestHandler):
         conn = get_conn()
         try:
             def g(k): return qs.get(k, [None])[0]
+            aid = self._auth_account(conn)
+            m = re.match(r"^/api/accounts/(\d+)/eval-roles$", path)
+            if m:
+                return self._account_eval_roles(conn, aid, int(m.group(1)), "GET")
             if path == "/api/overview":
                 aid = self._auth_account(conn)
                 if not has_cap(conn, aid, "system_admin"):
@@ -1596,9 +1556,6 @@ class Handler(BaseHTTPRequestHandler):
                     accounts=[dict(account_id=r["account_id"], display_name=r["display_name"], level=r["level"], status=r["status"]) for r in accts],
                     levels=LEVELS, statuses=PERM_STATUSES,
                     account_levels=ACCOUNT_LEVELS, account_statuses=ACCOUNT_STATUSES, system_version=SYSTEM_VERSION))
-            if path == "/api/eval-role-assigns":
-                aid = self._auth_account(conn)
-                return self._eval_role_assigns(conn, aid, "GET", b=dict(qs))
             if path == "/api/categories":
                 rows = conn.execute("SELECT id,domain,group_name,category FROM category_dict ORDER BY domain,group_name,category").fetchall()
                 return self._send(200, dict(rows=[dict(r) for r in rows]))
@@ -2159,8 +2116,6 @@ class Handler(BaseHTTPRequestHandler):
                 return self._add_exemption(conn, body)
             if parsed.path == "/api/registrations":
                 return self._add_registration(conn, aid, body)
-            if parsed.path == "/api/eval-role-assigns":
-                return self._eval_role_assigns(conn, aid, "POST", b=body)
             if parsed.path == "/api/leader/import":
                 return self._import_leaders(conn, body)
             if parsed.path == "/api/assess/cat-detail":
@@ -2704,6 +2659,8 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts) == 3 and parts[0] == "api" and parts[1] == "accounts":
                 if not ADMIN(): return self._send(403, {"error": "无权限：需要管理角色"})
                 return self._put_account(int(parts[2]), body)
+            if len(parts) == 4 and parts[0] == "api" and parts[1] == "accounts" and parts[2].isdigit() and parts[3] == "eval-roles":
+                return self._account_eval_roles(conn, aid, parts[2], "POST", b=body)
             if len(parts) == 3 and parts[0] == "api" and parts[1] == "assess" and parts[2] == "config":
                 if not ADMIN(): return self._send(403, {"error": "无权限：需要管理角色"})
                 return self._put_config(body)
@@ -2809,6 +2766,49 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             conn.close()
 
+    def _account_eval_roles(self, conn, aid, acct_id, method, b=None):
+        """评审角色绑定（已整合至账号模块）：仅超级管理员可读写；数据存于 account.eval_roles(JSON)。
+        模型：[{"role":..., "category":...}]，category 空=适用全部分类。不可跨权校验由 get_eval_roles 读取该字段。"""
+        if not is_super_admin(conn, aid):
+            return self._send(403, {"error": "无权限：评审角色绑定仅超级管理员可管理"})
+        # acct_id 为 URL 中的数字 id（前端标识）；account_id 为账号字符串标识（用于 change_log/权限关联）
+        r = conn.execute("SELECT id, account_id, eval_roles FROM account WHERE id=?", (acct_id,)).fetchone()
+        if not r:
+            return self._send(404, {"error": "账号不存在：%s" % acct_id})
+        acct_uid = r["account_id"]
+        if method == "GET":
+            roles = []
+            try:
+                roles = [x for x in (json.loads(r["eval_roles"] or "[]") or []) if isinstance(x, dict)]
+            except Exception:
+                pass
+            return self._send(200, dict(id=acct_id, account_id=acct_uid, roles=roles, all_roles=EVAL_REVIEW_ROLES))
+        # POST 设置
+        roles = (b or {}).get("roles")
+        if not isinstance(roles, list):
+            return self._send(400, {"error": "roles 必须为数组"})
+        clean, seen = [], set()
+        for it in roles:
+            if not isinstance(it, dict):
+                continue
+            role = (it.get("role") or "").strip()
+            if role not in EVAL_REVIEW_ROLES:
+                return self._send(400, {"error": "评审角色非法：%s（应为 %s 之一）" % (role, " / ".join(EVAL_REVIEW_ROLES))})
+            cat = (it.get("category") or "").strip()
+            key = (role, cat)
+            if key in seen:
+                continue
+            seen.add(key)
+            clean.append({"role": role, "category": cat})
+        now = _now()
+        conn.execute("UPDATE account SET eval_roles=? WHERE id=?",
+                     (json.dumps(clean, ensure_ascii=False), acct_id))
+        conn.execute("INSERT INTO change_log(permission_id,action,account_id,operator,change_time,detail) VALUES(?,?,?,?,?,?)",
+                     (0, "评审角色绑定", acct_uid, aid or "未署名", now,
+                      "更新评审角色绑定 %d 项：%s" % (len(clean), ", ".join("%s@%s" % (x["role"], x["category"] or "全部分类") for x in clean) or "（清空）")))
+        conn.commit()
+        return self._send(200, dict(ok=True, id=acct_id, account_id=acct_uid, eval_roles=clean))
+
     def _put_account(self, aid, b):
         conn = get_conn()
         try:
@@ -2905,9 +2905,6 @@ class Handler(BaseHTTPRequestHandler):
             # 避免超级管理员自身不具备管理角色时被误拦。
             if len(parts) == 3 and parts[0] == "api" and parts[1] == "messages" and parts[2].isdigit():
                 return self._del_message(conn, aid, int(parts[2]))
-            # 评审角色绑定：删除（仅超级管理员，由 _eval_role_assigns 内部校验）
-            if len(parts) == 3 and parts[0] == "api" and parts[1] == "eval-role-assigns" and parts[2].isdigit():
-                return self._eval_role_assigns(conn, aid, "DELETE", eid=int(parts[2]))
             # 报名删除允许申请人本人（非管理角色）操作，故不纳入统一管理员门禁
             if (not self._require_admin(conn, aid)) and not (len(parts)==3 and parts[0]=="api" and parts[1]=="registrations"):
                 return self._send(403, {"error": "无权限：需要管理角色（评审委员会成员/团队负责人/质量组长）"})
@@ -5149,6 +5146,24 @@ def migrate():
                 print("数据迁移：account 表移除冗余列 display_name")
             except sqlite3.OperationalError:
                 pass
+        # 数据迁移：评审角色绑定整合至账号模块（account.eval_roles JSON）
+        if "eval_roles" not in {x[1] for x in conn.execute("PRAGMA table_info(account)")}:
+            conn.execute("ALTER TABLE account ADD COLUMN eval_roles TEXT DEFAULT ''")
+            print("数据迁移：account 表新增 eval_roles 字段（评审角色绑定整合至账号模块）")
+        # 将 eval_role_assign 既有数据迁移进 account.eval_roles（幂等；表不存在则跳过）
+        try:
+            rows = conn.execute("SELECT account_id, role, category FROM eval_role_assign").fetchall()
+            if rows:
+                by_acct = {}
+                for r in rows:
+                    by_acct.setdefault(r["account_id"], []).append({"role": r["role"], "category": r["category"] or ""})
+                for aid_, lst in by_acct.items():
+                    conn.execute("UPDATE account SET eval_roles=? WHERE account_id=?", (json.dumps(lst, ensure_ascii=False), aid_))
+                print("数据迁移：已将 %d 条评审角色绑定整合进 account.eval_roles" % len(rows))
+                conn.execute("DROP TABLE eval_role_assign")
+                print("数据迁移：已删除冗余表 eval_role_assign（模块已整合至账号模块）")
+        except sqlite3.OperationalError:
+            pass
         # 历史报名自动建号账号：尚未取得正式权限的，等级由「初审」回退为「待转正」，待评估通过后再转正
         n_pending = conn.execute("""
             UPDATE account SET level='待转正', note=CASE
@@ -5299,9 +5314,17 @@ def migrate_team_config():
             seeded += 1
         for role, aid, cat in EVAL_LEAD_SEED:
             _ensure_acct(aid)
-            if not conn.execute("SELECT 1 FROM eval_role_assign WHERE role=? AND account_id=? AND category=?", (role, aid, cat)).fetchone():
-                conn.execute("INSERT INTO eval_role_assign(role,account_id,category,created_at,updated_at) VALUES(?,?,?,?,?)",
-                             (role, aid, cat, now, now))
+            # 评审角色绑定已整合至 account.eval_roles（账号模块）：幂等合并 JSON
+            cur = conn.execute("SELECT eval_roles FROM account WHERE account_id=?", (aid,)).fetchone()
+            lst = []
+            if cur and cur["eval_roles"]:
+                try:
+                    lst = json.loads(cur["eval_roles"]) or []
+                except Exception:
+                    lst = []
+            if not any(isinstance(x, dict) and x.get("role") == role and (x.get("category") or "") == (cat or "") for x in lst):
+                lst.append({"role": role, "category": cat or ""})
+                conn.execute("UPDATE account SET eval_roles=? WHERE account_id=?", (json.dumps(lst, ensure_ascii=False), aid))
             seeded += 1
         conn.commit()
         if seeded:

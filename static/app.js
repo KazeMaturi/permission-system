@@ -1636,7 +1636,6 @@ async function loadAccts(){
   if(al) al.innerHTML=ALL_ACCTS.map(r=>'<option value="'+escMsg(r.account_id)+'"></option>').join("");
   renderAcctList();
   loadPwdRequests();
-  loadEvalRoleAssigns();
 }
 async function loadPwdRequests(){
   if(!(ME&&ME.is_super_admin))return;
@@ -1662,6 +1661,7 @@ async function resetAccountPassword(accountId, after){
   await UI.alert("已重置成功。\n账号："+accountId+"\n新密码："+res.new_password+"\n（明文仅此一次展示，请立即复制并告知对方，提示对方登录后自行修改）");
   if(after)after();
 }
+let ACCT_EVAL_ROLES=[];
 function setAcctModal(r){
   document.getElementById("a-account").value=r.account_id;document.getElementById("a-level").value=r.level;document.getElementById("a-status").value=r.status;document.getElementById("a-join").value=r.join_date||"";document.getElementById("a-note").value=r.note||"";
   refreshCustomSelect("a-level");refreshCustomSelect("a-status");
@@ -1670,14 +1670,25 @@ function setAcctModal(r){
   if(rst)rst.style.display=show?"":"none";
   if(hint)hint.style.display=show?"block":"none";
   if(rst)rst.onclick=async()=>{if(!requireAuth())return;await resetAccountPassword(r.account_id);};
+  // 评审角色绑定（已整合至账号模块）：仅超级管理员可读写
+  const rolesWrap=document.getElementById("a-roles-wrap");
+  if(rolesWrap){ if(ME&&ME.is_super_admin){ rolesWrap.style.display=""; ACCT_EVAL_ROLES=[]; renderAcctEvalRoles();
+      fetch("/api/accounts/"+r.id+"/eval-roles",{headers:j()}).then(x=>x.json()).then(d=>{ ACCT_EVAL_ROLES=(d&&d.roles)||[]; renderAcctEvalRoles(); }).catch(()=>{ ACCT_EVAL_ROLES=[]; renderAcctEvalRoles(); });
+    } else { rolesWrap.style.display="none"; } }
   document.getElementById("modal-acct").classList.add("show");}
+function renderAcctEvalRoles(){const el=document.getElementById("a-roles-list");if(!el)return;
+  if(!ACCT_EVAL_ROLES.length){el.innerHTML='<span class="muted">暂无角色绑定</span>';return;}
+  el.innerHTML=ACCT_EVAL_ROLES.map((x,i)=>`<span class="tag">${escMsg(x.role)}${x.category?(' · '+escMsg(x.category)):''}<button class="linkbtn del" data-xr="${i}" title="移除">×</button></span>`).join("");}
 function openAcct(id){fetch("/api/accounts").then(r=>r.json()).then(d=>{const r=d.rows.find(x=>String(x.id)===String(id));if(r)setAcctModal(r);});}
 function openAcctByAid(aid){fetch("/api/accounts").then(r=>r.json()).then(d=>{const r=d.rows.find(x=>x.account_id===aid);if(r)setAcctModal(r);});}
 async function saveAcct(){if(!requireAuth())return;
   const aid=document.getElementById("a-account").value;const b={level:val("a-level"),status:val("a-status"),join_date:val("a-join"),note:val("a-note")};
   const acctId=await findAcctId(aid);if(!acctId){await UI.alert("未找到该账号的ID");return;}
   const res=await fetch("/api/accounts/"+acctId,{method:"PUT",headers:j(),body:JSON.stringify(b)}).then(r=>r.json());
-  if(res.error){await UI.alert("保存失败："+res.error);return;}document.getElementById("modal-acct").classList.remove("show");loadAccts();loadDict();loadOverview();loadLedger();loadLogs();}
+  if(res.error){await UI.alert("保存失败："+res.error);return;}
+  if(ME&&ME.is_super_admin){const er=await fetch("/api/accounts/"+acctId+"/eval-roles",{method:"PUT",headers:j(),body:JSON.stringify({roles:ACCT_EVAL_ROLES})}).then(r=>r.json());
+    if(er.error){await UI.alert("评审角色绑定保存失败："+er.error);}}
+  document.getElementById("modal-acct").classList.remove("show");loadAccts();loadDict();loadOverview();loadLedger();loadLogs();}
 async function findAcctId(aid){const d=await API("/api/accounts");const r=d.rows.find(x=>x.account_id===aid);return r?r.id:null;}
 async function loadCategories(){
   const d=await API("/api/categories");
@@ -2292,21 +2303,6 @@ function showPage(p){
 function showDictSub(sub){document.querySelectorAll("#page-dict .subtab").forEach(b=>b.classList.toggle("active",b.dataset.dict===sub));
   document.getElementById("dict-accts").style.display=sub==="accts"?"block":"none";document.getElementById("dict-cats").style.display=sub==="cats"?"block":"none";
   if(sub==="accts")loadAccts();}
-async function loadEvalRoleAssigns(){
-  if(!(ME&&ME.is_super_admin))return;
-  const tb=document.getElementById("er-body");if(!tb)return;
-  const d=await API("/api/eval-role-assigns");
-  const rows=(d&&d.rows)||[];
-  if(!rows.length){tb.innerHTML='<tr><td colspan="6" class="empty">暂无角色绑定</td></tr>';return;}
-  tb.innerHTML=rows.map(r=>`<tr>
-    <td>${escMsg(r.role)}</td>
-    <td>${escMsg(r.account_id)}</td>
-    <td>${escMsg(r.display_name||"")}</td>
-    <td>${r.category?escMsg(r.category):'<span class="muted">全部分类</span>'}</td>
-    <td>${escMsg(r.created_at||"")}</td>
-    <td><button class="linkbtn del" data-er="${r.id}">解除</button></td>
-  </tr>`).join("");
-}
 function bind(){
   // ESC 关闭弹窗：优先关闭自定义下拉，再关闭最上层弹窗；UI.alert/confirm/prompt 按取消处理
   document.addEventListener("keydown",e=>{
@@ -2477,24 +2473,16 @@ function bind(){
     document.getElementById("modal-am-scope").classList.remove("show");
     await amGrant(p.target,p.role,scope);
   };
-  // 评审角色绑定（仅超级管理员）
-  const erAdd=document.getElementById("btn-er-add");
-  if(erAdd)erAdd.onclick=async()=>{
-    const role=val("er-role");const account=val("er-account").trim();const category=val("er-category").trim();
-    if(!account){await UI.alert("请填写人员账号");return;}
-    const res=await API("/api/eval-role-assigns",{method:"POST",headers:j(),body:JSON.stringify({role,account_id:account,category})});
-    if(res.error){await UI.alert("添加失败："+res.error);return;}
-    document.getElementById("er-account").value="";loadEvalRoleAssigns();showToast("已添加角色绑定","ok");
-  };
-  const erBody=document.getElementById("er-body");
-  if(erBody)erBody.addEventListener("click",async e=>{
-    const btn=e.target.closest("[data-er]");if(!btn)return;
-    const id=btn.getAttribute("data-er");
-    const res=await API("/api/eval-role-assigns/"+id,{method:"DELETE",headers:j()});
-    if(res.error){await UI.alert("解除失败："+res.error);return;}
-    loadEvalRoleAssigns();showToast("已解除绑定","ok");
-  });
   document.getElementById("vio-penalty").onchange=toggleVioTerm;
+  // 评审角色绑定（已整合至账号模块）：账号弹窗内增删
+  const aRoleAdd=document.getElementById("a-role-add");
+  if(aRoleAdd)aRoleAdd.onclick=()=>{
+    const role=val("a-role");const cat=val("a-role-cat").trim();
+    if(ACCT_EVAL_ROLES.some(x=>x.role===role&&(x.category||"")===cat)){showToast("该角色+分类已存在","warn");return;}
+    ACCT_EVAL_ROLES.push({role,category:cat});document.getElementById("a-role-cat").value="";renderAcctEvalRoles();
+  };
+  const aRolesList=document.getElementById("a-roles-list");
+  if(aRolesList)aRolesList.addEventListener("click",e=>{const btn=e.target.closest("[data-xr]");if(!btn)return;ACCT_EVAL_ROLES.splice(parseInt(btn.getAttribute("data-xr")),1);renderAcctEvalRoles();});
   document.getElementById("btn-appeal-add").onclick=()=>openAppeal(null);
   document.getElementById("ap-cancel").onclick=()=>document.getElementById("modal-appeal").classList.remove("show");
   document.getElementById("ap-save").onclick=saveAppeal;

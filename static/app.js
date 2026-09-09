@@ -2165,8 +2165,13 @@ async function doLogin(){const acc=document.getElementById("lg-account").value.t
   if(!res.token){msg.textContent="登录失败：账号或密码错误"; msg.style.color="var(--bad)"; return;}
   setToken(res.token); ME={account_id:res.account_id,level:res.level,status:res.status,is_reviewer:res.is_reviewer,is_admin:res.is_admin,is_senior:!!res.is_senior,is_super_admin:!!res.is_super_admin,is_official:!!res.is_official,eval_roles:res.eval_roles||[]};
   document.getElementById("modal-login").classList.remove("show"); renderUser();
-  // 登录后重新渲染当前已打开的页面（如总览），否则其图表/统计因登录前未鉴权而未加载
-  const _ap=document.querySelector(".page.active"); if(_ap) showPage(_ap.id.replace("page-",""));
+  // 登录后重新渲染当前已打开的页面；若当前为系统管理页但登录后仍无权限，则回退到权限台账
+  const _ap=document.querySelector(".page.active"); 
+  if(_ap){
+    const pid=_ap.id.replace("page-","");
+    if(["overview","dict","logs","audit","permsort","logins"].includes(pid)&&!(ME.is_admin||ME.is_super_admin)){ showPage("ledger"); }
+    else { showPage(pid); }
+  }
   // 刷新依赖权限的视图；若当前在制度页则只重载该页资源，否则整页刷新使受保护资源可见
   if(document.getElementById("page-system").classList.contains("active")){ loadSystem(); showToast("登录成功："+res.account_id+(res.is_reviewer?"（审核员）":""),"ok"); }
   else { showToast("登录成功，正在刷新页面…","ok"); location.reload(); }
@@ -2251,9 +2256,9 @@ const UI={
   }
 };
 function requireAuth(msg="请先登录后再进行此操作"){if(!ME||!ME.account_id){UI.alert(msg); return false;} return true;}
-function requireAdmin(){if(!requireAuth("请先登录"))return false; if(!ME.is_admin){UI.alert("无权限：系统管理仅对管理员开放"); return false;} return true;}
+function requireAdmin(){if(!requireAuth("请先登录"))return false; if(!(ME.is_admin||ME.is_super_admin)){UI.alert("无权限：系统管理仅对管理员开放"); return false;} return true;}
 function updateAdminNav(){
-  const show = !!(ME && ME.account_id && ME.is_admin);
+  const show = !!(ME && ME.account_id && (ME.is_admin||ME.is_super_admin));
   document.querySelectorAll("[data-admin='1']").forEach(el=>{
     if(el.classList.contains("navbtn")){el.style.display = show ? "" : "none";}
     else {el.style.display = show ? "flex" : "none";}
@@ -2573,4 +2578,4 @@ function bind(){
   document.getElementById("audit-search").oninput=renderAudit;
 }
 
-(async function(){await loadDict();await loadPeriods();bind();await loadMe();showPage("overview");startReqStarsWatcher();window.addEventListener("resize",()=>{const p=document.querySelector(".navbtn.active")?.dataset.page;if(p==="overview")loadOverview();if(p==="assess"&&document.getElementById("sub-summary").style.display!=="none")loadSummary();});})();
+(async function(){await loadDict();await loadPeriods();bind();await loadMe();if(ME&&(ME.is_admin||ME.is_super_admin)){showPage("overview");}else{showPage("ledger");}startReqStarsWatcher();window.addEventListener("resize",()=>{const p=document.querySelector(".navbtn.active")?.dataset.page;if(p==="overview")loadOverview();if(p==="assess"&&document.getElementById("sub-summary").style.display!=="none")loadSummary();});})();
